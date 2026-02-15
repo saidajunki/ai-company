@@ -1,0 +1,17 @@
+services:
+  ai-company:
+    build: .
+    image: ai-company:latest
+    container_name: ai-company
+    restart: "no"
+    volumes:
+      - ai-company-data:/app/data
+    networks:
+      - apps-network
+
+volumes:
+  ai-company-data:
+
+networks:
+  apps-network:
+    external: true
