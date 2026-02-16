@@ -3,7 +3,15 @@ services:
     build: .
     image: ai-company:latest
     container_name: ai-company
-    restart: "no"
+    restart: unless-stopped
+    environment:
+      - COMPANY_ID=alpha
+      - BASE_DIR=/app/data
+      - HEARTBEAT_INTERVAL=180
+      - REPORT_INTERVAL=600
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN}
+      - SLACK_CHANNEL_ID=C0AF21AFC14
     volumes:
       - ai-company-data:/app/data
     networks:

@@ -30,3 +30,6 @@ htmlcov/
 
 # Kiro
 .kiro/
+
+# Environment (secrets)
+.env

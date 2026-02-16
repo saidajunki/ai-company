@@ -15,9 +15,15 @@ COPY tests/ tests/
 # Install Python dependencies
 RUN pip install --no-cache-dir ".[dev]"
 
-# Create non-root user
-RUN useradd -m -u 1000 company
+# Create non-root user and data directory with correct ownership
+RUN useradd -m -u 1000 company \
+    && mkdir -p /app/data \
+    && chown -R company:company /app/data
 USER company
 
-# Default: run tests to verify installation
-CMD ["python", "-m", "pytest", "tests/", "-v", "--tb=short"]
+# Health check via heartbeat file existence
+HEALTHCHECK --interval=60s --timeout=5s --retries=3 \
+    CMD test -f /app/data/companies/${COMPANY_ID:-alpha}/state/heartbeat.json || exit 1
+
+# Run the manager as a long-running process
+CMD ["python", "-m", "main"]

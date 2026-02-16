@@ -6,6 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
+    "slack-bolt>=1.18",
+    "slack-sdk>=3.27",
 ]
 
 [project.optional-dependencies]
