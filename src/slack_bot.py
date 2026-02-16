@@ -76,6 +76,22 @@ class SlackBot:
             if self._on_reaction:
                 self._on_reaction(request_id, mapped, user_id)
 
+        @self.app.event("app_mention")
+        def handle_app_mention(event: dict, say) -> None:
+            text = event.get("text", "")
+            user_id = event.get("user", "")
+            if not text or not user_id:
+                return
+            # Strip the mention tag (e.g. "<@U12345> hello" -> "hello")
+            import re
+            text = re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
+            if not text:
+                return
+
+            log.info("Mention from %s: %s", user_id, text[:80])
+            if self._on_message:
+                self._on_message(text, user_id)
+
         @self.app.event("message")
         def handle_message(event: dict, say) -> None:
             text = event.get("text", "")
