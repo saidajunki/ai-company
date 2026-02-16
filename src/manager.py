@@ -9,13 +9,18 @@ Requirements: 7.1, 7.2, 7.6
 
 from __future__ import annotations
 
+import logging
 import os
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from constitution_store import constitution_save
+from context_builder import build_system_prompt
 from cost_aggregator import compute_window_cost, is_budget_exceeded
 from heartbeat import update_heartbeat, update_heartbeat_on_report
+from llm_client import LLMClient, LLMError, LLMResponse
 from manager_state import (
     ManagerState,
     append_ledger_event,
@@ -33,6 +38,10 @@ from pricing import (
 )
 from recovery import determine_recovery_action, RecoveryAction
 from report_formatter import CostSummary, ReportData, format_report
+from response_parser import Action, parse_response
+from shell_executor import ShellResult, execute_shell
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +83,21 @@ def init_company_directory(base_dir: Path, company_id: str) -> None:
     if not constitution_file.exists():
         constitution_save(constitution_file, ConstitutionModel())
 
+# ---------------------------------------------------------------------------
+# TaskStep dataclass (Req 5.1, 5.3, 5.4)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TaskStep:
+    """Individual execution step within a task."""
+    step_id: str
+    description: str
+    status: Literal["pending", "running", "completed", "failed"]
+    command: str | None = None
+    output: str | None = None
+    error: str | None = None
+
+
 
 # ---------------------------------------------------------------------------
 # Manager class
@@ -105,6 +129,10 @@ class Manager:
         # Load pricing cache
         cache_path = pricing_cache_path(base_dir, company_id)
         self.pricing_cache = load_pricing_cache(cache_path)
+
+        # Set externally after construction
+        self.llm_client: LLMClient | None = None
+        self.slack: "SlackBot | None" = None  # noqa: F821 — forward ref
 
     # ------------------------------------------------------------------
     # Startup (Req 7.1, 7.6)
@@ -242,3 +270,224 @@ class Manager:
         )
 
         return report
+
+    # ------------------------------------------------------------------
+    # Message processing — Think → Act → Report (Req 3.1–3.4, 4.1–4.6)
+    # ------------------------------------------------------------------
+
+    _MAX_WIP = 3
+    _MAX_ACTION_LOOP = 10
+
+    # ------------------------------------------------------------------
+    # WIP management (Req 5.1, 5.2, 5.5)
+    # ------------------------------------------------------------------
+
+    def add_wip(self, task_name: str) -> bool:
+        """Add a task to the WIP list.
+
+        Returns ``True`` if the task was added, ``False`` if the WIP limit
+        (3) has been reached.
+        """
+        if len(self.state.wip) >= self._MAX_WIP:
+            logger.warning("WIP limit reached (%d), cannot add: %s", self._MAX_WIP, task_name)
+            return False
+        self.state.wip.append(task_name)
+        return True
+
+    def remove_wip(self, task_name: str) -> bool:
+        """Remove a task from the WIP list.
+
+        Returns ``True`` if the task was found and removed, ``False`` otherwise.
+        """
+        try:
+            self.state.wip.remove(task_name)
+            return True
+        except ValueError:
+            logger.warning("Task not in WIP, cannot remove: %s", task_name)
+            return False
+
+    # ------------------------------------------------------------------
+    # Message processing — Think → Act → Report (Req 3.1–3.4, 4.1–4.6)
+    # ------------------------------------------------------------------
+
+    def process_message(self, text: str, user_id: str) -> None:
+        """Creatorメッセージを処理する（Think → Act → Report）.
+
+        1. 予算チェック
+        2. コンテキスト構築
+        3. LLM呼び出し
+        4. 応答パース
+        5. アクション実行（ループ）
+        6. 結果報告
+        """
+        task_id = f"msg-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        logger.info("process_message start: user=%s task=%s", user_id, task_id)
+
+        try:
+            # 1. 予算チェック
+            if self.check_budget():
+                logger.warning("Budget exceeded, rejecting message")
+                self._slack_send("予算上限に達したため処理できません")
+                return
+
+            if self.llm_client is None:
+                logger.error("LLM client not configured")
+                self._slack_send("エラー: LLMクライアントが設定されていません")
+                return
+
+            # 2. コンテキスト構築
+            now = datetime.now(timezone.utc)
+            spent = compute_window_cost(self.state.ledger_events, now)
+            limit = DEFAULT_BUDGET_LIMIT_USD
+            if self.state.constitution and self.state.constitution.budget:
+                limit = self.state.constitution.budget.limit_usd
+
+            recent_decisions = self.state.decision_log[-5:]
+
+            system_prompt = build_system_prompt(
+                constitution=self.state.constitution,
+                wip=self.state.wip,
+                recent_decisions=recent_decisions,
+                budget_spent=spent,
+                budget_limit=limit,
+            )
+
+            conversation: list[dict[str, str]] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ]
+
+            # 3. LLM呼び出し
+            llm_result = self.llm_client.chat(conversation)
+
+            if isinstance(llm_result, LLMError):
+                logger.error("LLM call failed: %s", llm_result.message)
+                self._slack_send(f"エラー: LLM呼び出しに失敗しました — {llm_result.message}")
+                return
+
+            # 4. Ledger記録
+            self.record_llm_call(
+                provider="openrouter",
+                model=llm_result.model,
+                input_tokens=llm_result.input_tokens,
+                output_tokens=llm_result.output_tokens,
+                task_id=task_id,
+            )
+            logger.info(
+                "LLM call recorded: in=%d out=%d model=%s",
+                llm_result.input_tokens,
+                llm_result.output_tokens,
+                llm_result.model,
+            )
+
+            # 5. 応答パース
+            actions = parse_response(llm_result.content)
+            conversation.append({"role": "assistant", "content": llm_result.content})
+
+            # 6. アクション実行ループ
+            self._execute_action_loop(actions, conversation, task_id)
+
+        except Exception:
+            logger.exception("Unexpected error in process_message")
+            self._slack_send("エラー: メッセージ処理中に予期しないエラーが発生しました")
+
+    def _execute_action_loop(
+        self,
+        actions: list[Action],
+        conversation: list[dict[str, str]],
+        task_id: str,
+    ) -> None:
+        """アクションを順次実行し、必要に応じてLLMに再問い合わせする."""
+        iterations = 0
+        work_dir = self.base_dir / "companies" / self.company_id
+
+        while actions and iterations < self._MAX_ACTION_LOOP:
+            iterations += 1
+            next_actions: list[Action] = []
+
+            for action in actions:
+                if action.action_type == "reply":
+                    self._slack_send(action.content)
+
+                elif action.action_type == "done":
+                    self._slack_send(f"完了: {action.content}")
+
+                elif action.action_type == "shell_command":
+                    logger.info("Executing shell: %s", action.content)
+                    shell_result = execute_shell(
+                        command=action.content,
+                        cwd=work_dir,
+                    )
+
+                    # Record shell_exec event in ledger
+                    now = datetime.now(timezone.utc)
+                    shell_event = LedgerEvent(
+                        timestamp=now,
+                        event_type="shell_exec",
+                        agent_id="manager",
+                        task_id=task_id,
+                        estimated_cost_usd=0,
+                        metadata={
+                            "command": shell_result.command,
+                            "return_code": shell_result.return_code,
+                            "duration_seconds": shell_result.duration_seconds,
+                        },
+                    )
+                    append_ledger_event(self.base_dir, self.company_id, shell_event)
+                    self.state.ledger_events.append(shell_event)
+
+                    # Build follow-up message with shell result
+                    result_text = self._format_shell_result(shell_result)
+                    conversation.append({"role": "user", "content": result_text})
+
+                    # Re-query LLM with the shell result
+                    if self.llm_client is None:
+                        break
+
+                    llm_result = self.llm_client.chat(conversation)
+                    if isinstance(llm_result, LLMError):
+                        logger.error("Follow-up LLM call failed: %s", llm_result.message)
+                        self._slack_send(
+                            f"エラー: LLM再問い合わせに失敗しました — {llm_result.message}",
+                        )
+                        return
+
+                    self.record_llm_call(
+                        provider="openrouter",
+                        model=llm_result.model,
+                        input_tokens=llm_result.input_tokens,
+                        output_tokens=llm_result.output_tokens,
+                        task_id=task_id,
+                    )
+                    conversation.append({"role": "assistant", "content": llm_result.content})
+
+                    next_actions = parse_response(llm_result.content)
+                    break  # Process new actions in next iteration
+
+            # If no shell_command triggered a new LLM call, we're done
+            if not next_actions:
+                break
+            actions = next_actions
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _slack_send(self, text: str) -> None:
+        """Send a message via Slack if the bot is configured."""
+        if self.slack is not None:
+            self.slack.send_message(text)
+        else:
+            logger.warning("Slack not configured, message not sent: %s", text[:100])
+
+    @staticmethod
+    def _format_shell_result(result: ShellResult) -> str:
+        """Format a ShellResult for inclusion in the LLM conversation."""
+        parts = [f"コマンド実行結果 (return_code={result.return_code}):"]
+        if result.timed_out:
+            parts.append("⚠️ タイムアウトしました")
+        if result.stdout:
+            parts.append(f"stdout:\n{result.stdout}")
+        if result.stderr:
+            parts.append(f"stderr:\n{result.stderr}")
+        return "\n".join(parts)

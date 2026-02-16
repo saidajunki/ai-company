@@ -19,7 +19,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from amendment import approve_amendment, reject_amendment
+from llm_client import LLMClient
 from manager import Manager, init_company_directory
+from manager_state import constitution_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,6 +68,13 @@ def main() -> None:
     action, description = mgr.startup()
     log.info("Startup complete – recovery action: %s (%s)", action, description)
 
+    # Initialize LLM client if API key is configured (Req 1.6)
+    if OPENROUTER_API_KEY:
+        mgr.llm_client = LLMClient(api_key=OPENROUTER_API_KEY, model=OPENROUTER_MODEL)
+        log.info("LLM client initialized (model: %s)", OPENROUTER_MODEL)
+    else:
+        log.warning("OPENROUTER_API_KEY not set – LLM features disabled")
+
     # --- Slack integration ---
     slack = None
     if SLACK_BOT_TOKEN and SLACK_APP_TOKEN:
@@ -72,11 +82,81 @@ def main() -> None:
 
         def on_reaction(request_id: str, result: str, user_id: str) -> None:
             log.info("Approval %s for %s by %s", result, request_id, user_id)
-            # TODO: route to amendment/approval logic
+
+            # Find the proposal in decision_log by request_id
+            # Check if already processed (approved/rejected entry exists)
+            proposal = None
+            already_processed = False
+            for entry in mgr.state.decision_log:
+                if entry.request_id == request_id:
+                    if entry.status in ("approved", "rejected"):
+                        already_processed = True
+                        break
+                    if entry.status == "proposed":
+                        proposal = entry
+
+            if already_processed:
+                log.warning("Request %s already processed", request_id)
+                slack.send_message(
+                    f"⚠️ 承認リクエスト `{request_id}` は既に処理済みです"
+                )
+                return
+
+            if proposal is None:
+                log.warning("No pending proposal found for request_id=%s", request_id)
+                slack.send_message(
+                    f"⚠️ 承認リクエスト `{request_id}` に対応する提案が見つかりません"
+                )
+                return
+
+            const_path = constitution_path(BASE_DIR, COMPANY_ID)
+
+            try:
+                if result == "approved":
+                    updated = approve_amendment(
+                        constitution=mgr.state.constitution,
+                        proposal=proposal,
+                        constitution_path=const_path,
+                        base_dir=BASE_DIR,
+                        company_id=COMPANY_ID,
+                    )
+                    mgr.state.constitution = updated
+                    # Reload decision_log to include the new approved entry
+                    from manager_state import restore_state
+                    mgr.state.decision_log = restore_state(BASE_DIR, COMPANY_ID).decision_log
+                    slack.send_message(
+                        f"✅ 憲法変更が承認されました (v{updated.version})\n"
+                        f"変更内容: {proposal.decision}"
+                    )
+                    log.info("Amendment approved: %s (v%d)", proposal.decision, updated.version)
+
+                elif result == "rejected":
+                    reject_amendment(
+                        proposal=proposal,
+                        base_dir=BASE_DIR,
+                        company_id=COMPANY_ID,
+                    )
+                    # Reload decision_log to include the new rejected entry
+                    from manager_state import restore_state
+                    mgr.state.decision_log = restore_state(BASE_DIR, COMPANY_ID).decision_log
+                    slack.send_message(
+                        f"❌ 憲法変更が却下されました\n"
+                        f"変更内容: {proposal.decision}"
+                    )
+                    log.info("Amendment rejected: %s", proposal.decision)
+
+                else:
+                    log.warning("Unknown reaction result: %s", result)
+
+            except Exception:
+                log.exception("Error processing reaction for %s", request_id)
+                slack.send_message(
+                    f"⚠️ 承認処理中にエラーが発生しました (request_id: {request_id})"
+                )
 
         def on_message(text: str, user_id: str) -> None:
             log.info("Creator message: %s (from %s)", text[:100], user_id)
-            # TODO: route to task processing
+            mgr.process_message(text, user_id)
 
         slack = SlackBot(
             bot_token=SLACK_BOT_TOKEN,
@@ -85,6 +165,7 @@ def main() -> None:
             on_message=on_message,
         )
         slack.start()
+        mgr.slack = slack
         log.info("Slack Bot connected (Socket Mode)")
 
         # Send startup notification

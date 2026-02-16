@@ -332,3 +332,72 @@ class TestGenerateReport:
         report = mgr.generate_report()
 
         assert "$2.50" in report
+
+
+# ---------------------------------------------------------------------------
+# WIP management (Task 6.2)
+# ---------------------------------------------------------------------------
+
+class TestAddWip:
+    def test_add_single_task(self, tmp_path: Path):
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        assert mgr.add_wip("task-a") is True
+        assert mgr.state.wip == ["task-a"]
+
+    def test_add_up_to_limit(self, tmp_path: Path):
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        assert mgr.add_wip("task-a") is True
+        assert mgr.add_wip("task-b") is True
+        assert mgr.add_wip("task-c") is True
+        assert len(mgr.state.wip) == 3
+
+    def test_add_beyond_limit_returns_false(self, tmp_path: Path):
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        mgr.add_wip("task-a")
+        mgr.add_wip("task-b")
+        mgr.add_wip("task-c")
+        assert mgr.add_wip("task-d") is False
+        assert len(mgr.state.wip) == 3
+        assert "task-d" not in mgr.state.wip
+
+    def test_add_preserves_order(self, tmp_path: Path):
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        mgr.add_wip("first")
+        mgr.add_wip("second")
+        assert mgr.state.wip == ["first", "second"]
+
+
+class TestRemoveWip:
+    def test_remove_existing_task(self, tmp_path: Path):
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        mgr.add_wip("task-a")
+        assert mgr.remove_wip("task-a") is True
+        assert mgr.state.wip == []
+
+    def test_remove_nonexistent_returns_false(self, tmp_path: Path):
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        assert mgr.remove_wip("no-such-task") is False
+
+    def test_remove_from_empty_returns_false(self, tmp_path: Path):
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        assert mgr.remove_wip("anything") is False
+
+    def test_remove_allows_adding_again(self, tmp_path: Path):
+        """After removing a task from a full WIP, a new task can be added."""
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        mgr.add_wip("a")
+        mgr.add_wip("b")
+        mgr.add_wip("c")
+        assert mgr.add_wip("d") is False  # full
+        mgr.remove_wip("b")
+        assert mgr.add_wip("d") is True
+        assert "d" in mgr.state.wip
+        assert "b" not in mgr.state.wip
