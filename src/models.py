@@ -11,7 +11,12 @@ Defines the core data structures used throughout the system:
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any, Literal, Optional
+from typing import Any, Dict, List, Optional
+
+try:
+    from typing import Literal
+except ImportError:
+    from typing_extensions import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -31,7 +36,7 @@ class CreatorScorePolicy(BaseModel):
     priority: str = "面白さ最優先"
     axis_max_score: int = 25
     total_max_score: int = 100
-    axes: dict[str, str] = Field(default_factory=lambda: {
+    axes: Dict[str, str] = Field(default_factory=lambda: {
         "面白さ": (
             "単純に面白い/興味を持てるか。人の野心や知的欲求を満たせるか。"
             "お金が稼げる/コストがかかる等はこの軸では考慮しない。"
@@ -57,7 +62,7 @@ class CreatorScorePolicy(BaseModel):
 
 
 class CreatorIntervention(BaseModel):
-    scope: list[str] = Field(default_factory=lambda: [
+    scope: List[str] = Field(default_factory=lambda: [
         "契約・支払い方法の登録・アカウント作成",
         "上記に付随する承認",
     ])
@@ -127,7 +132,7 @@ class LedgerEvent(BaseModel):
     api_unit_price_usd: Optional[float] = Field(default=None, ge=0)
 
     # Generic metadata
-    metadata: Optional[dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
 
     @model_validator(mode="after")
     def validate_event_fields(self) -> "LedgerEvent":
@@ -170,7 +175,7 @@ class HeartbeatState(BaseModel):
     updated_at: datetime
     manager_pid: int
     status: Literal["running", "idle", "waiting_approval"]
-    current_wip: list[str] = Field(default_factory=list, max_length=3)
+    current_wip: List[str] = Field(default_factory=list, max_length=3)
     last_report_at: Optional[datetime] = None
 
 
@@ -188,7 +193,7 @@ class PricingCache(BaseModel):
     """単価キャッシュのモデル (Req 9.4)."""
 
     retrieved_at: datetime
-    models: dict[str, ModelPricing] = Field(default_factory=dict)
+    models: Dict[str, ModelPricing] = Field(default_factory=dict)
 
 
 # --- Conversation Memory (Req 1.1) ---
@@ -217,7 +222,7 @@ class TaskEntry(BaseModel):
     result: Optional[str] = None
     error: Optional[str] = None
     agent_id: str = "ceo"
-    depends_on: list[str] = Field(default_factory=list)
+    depends_on: List[str] = Field(default_factory=list)
     quality_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     quality_notes: Optional[str] = None
     retry_count: int = Field(default=0, ge=0)
@@ -340,7 +345,7 @@ class InitiativeEntry(BaseModel):
         "abandoned",
         "consulting",
     ]
-    task_ids: list[str] = Field(default_factory=list)
+    task_ids: List[str] = Field(default_factory=list)
     estimated_scores: Optional[InitiativeScores] = None
     actual_scores: Optional[InitiativeScores] = None
     retrospective: Optional[str] = None
@@ -352,9 +357,9 @@ class InitiativeEntry(BaseModel):
 class StrategyDirection(BaseModel):
     """戦略方針の分析結果."""
 
-    strengthen: list[str] = Field(default_factory=list)
-    avoid: list[str] = Field(default_factory=list)
-    pivot_suggestions: list[str] = Field(default_factory=list)
-    weak_axes: list[str] = Field(default_factory=list)
-    score_trends: dict[str, float] = Field(default_factory=dict)
+    strengthen: List[str] = Field(default_factory=list)
+    avoid: List[str] = Field(default_factory=list)
+    pivot_suggestions: List[str] = Field(default_factory=list)
+    weak_axes: List[str] = Field(default_factory=list)
+    score_trends: Dict[str, float] = Field(default_factory=dict)
     summary: str = ""

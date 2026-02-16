@@ -154,3 +154,75 @@ class TestEmptyQueue:
 
     def test_next_pending_empty(self, tq: TaskQueue) -> None:
         assert tq.next_pending() is None
+
+
+class TestAddWithDepsParentTaskId:
+    def test_parent_task_id_is_set(self, tq: TaskQueue) -> None:
+        parent = tq.add("parent task")
+        child = tq.add_with_deps("child", depends_on=[], parent_task_id=parent.task_id)
+        assert child.parent_task_id == parent.task_id
+        assert child.status == "pending"
+
+    def test_parent_task_id_defaults_to_none(self, tq: TaskQueue) -> None:
+        task = tq.add_with_deps("no parent", depends_on=[])
+        assert task.parent_task_id is None
+
+    def test_parent_task_id_persisted(self, tq: TaskQueue) -> None:
+        parent = tq.add("parent")
+        tq.add_with_deps("child", depends_on=[], parent_task_id=parent.task_id)
+        all_tasks = tq.list_all()
+        child = [t for t in all_tasks if t.description == "child"][0]
+        assert child.parent_task_id == parent.task_id
+
+
+class TestListByParent:
+    def test_returns_children_of_parent(self, tq: TaskQueue) -> None:
+        parent = tq.add("parent")
+        c1 = tq.add_with_deps("child1", depends_on=[], parent_task_id=parent.task_id)
+        c2 = tq.add_with_deps("child2", depends_on=[c1.task_id], parent_task_id=parent.task_id)
+        tq.add("unrelated")
+        children = tq.list_by_parent(parent.task_id)
+        assert len(children) == 2
+        descs = {t.description for t in children}
+        assert descs == {"child1", "child2"}
+
+    def test_returns_empty_when_no_children(self, tq: TaskQueue) -> None:
+        parent = tq.add("lonely parent")
+        assert tq.list_by_parent(parent.task_id) == []
+
+    def test_returns_empty_for_nonexistent_parent(self, tq: TaskQueue) -> None:
+        assert tq.list_by_parent("no-such-id") == []
+
+
+class TestUpdateStatusForRetry:
+    def test_sets_pending_and_retry_count(self, tq: TaskQueue) -> None:
+        task = tq.add("retry me")
+        tq.update_status(task.task_id, "failed", error="oops")
+        tq.update_status_for_retry(task.task_id, retry_count=1)
+        updated = tq.list_all()
+        assert len(updated) == 1
+        assert updated[0].status == "pending"
+        assert updated[0].retry_count == 1
+
+    def test_updates_updated_at(self, tq: TaskQueue) -> None:
+        task = tq.add("retry timing")
+        tq.update_status(task.task_id, "failed", error="err")
+        before = tq.list_all()[0].updated_at
+        tq.update_status_for_retry(task.task_id, retry_count=1)
+        after = tq.list_all()[0].updated_at
+        assert after >= before
+
+    def test_preserves_other_fields(self, tq: TaskQueue) -> None:
+        task = tq.add("preserve fields", priority=2, agent_id="worker-1")
+        tq.update_status(task.task_id, "failed", error="fail")
+        tq.update_status_for_retry(task.task_id, retry_count=1)
+        updated = tq.list_all()[0]
+        assert updated.priority == 2
+        assert updated.agent_id == "worker-1"
+        assert updated.created_at == task.created_at
+
+    def test_nonexistent_task_raises(self, tq: TaskQueue) -> None:
+        with pytest.raises(ValueError, match="Task not found"):
+            tq.update_status_for_retry("no-such-id", retry_count=1)
+
+

@@ -42,8 +42,9 @@ class TaskQueue:
         depends_on: list[str],
         priority: int = 3,
         agent_id: str = "ceo",
+        parent_task_id: str | None = None,
     ) -> TaskEntry:
-        """新しいタスクを依存関係付きで追加する."""
+        """新しいタスクを依存関係・親タスクID付きで追加する."""
         now = datetime.now(timezone.utc)
         entry = TaskEntry(
             task_id=uuid4().hex[:8],
@@ -54,6 +55,7 @@ class TaskQueue:
             updated_at=now,
             agent_id=agent_id,
             depends_on=depends_on,
+            parent_task_id=parent_task_id,
         )
         ndjson_append(self._path, entry)
         return entry
@@ -112,6 +114,23 @@ class TaskQueue:
     def list_by_status(self, status: str) -> list[TaskEntry]:
         """指定ステータスのタスクを返す."""
         return [t for t in self.list_all() if t.status == status]
+
+    def list_by_parent(self, parent_task_id: str) -> list[TaskEntry]:
+        """指定した親タスクIDのサブタスクを返す."""
+        return [t for t in self.list_all() if t.parent_task_id == parent_task_id]
+
+    def update_status_for_retry(self, task_id: str, retry_count: int) -> None:
+        """ステータスをpendingに戻しretry_countを更新する."""
+        current = self._get_latest(task_id)
+        if current is None:
+            raise ValueError(f"Task not found: {task_id}")
+        updated = current.model_copy(update={
+            "status": "pending",
+            "retry_count": retry_count,
+            "updated_at": datetime.now(timezone.utc),
+        })
+        ndjson_append(self._path, updated)
+
 
     def _get_latest(self, task_id: str) -> TaskEntry | None:
         """task_idの最新エントリを返す."""

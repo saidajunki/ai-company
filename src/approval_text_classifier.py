@@ -7,7 +7,10 @@ Uses simple heuristics first, and optionally falls back to an LLM.
 from __future__ import annotations
 
 import re
-from typing import Literal
+try:
+    from typing import Literal
+except ImportError:
+    from typing_extensions import Literal
 
 from llm_client import LLMClient, LLMError
 

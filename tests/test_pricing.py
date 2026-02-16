@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from typing import Dict, Optional
+
 from models import ModelPricing, PricingCache
 from pricing import (
     get_model_pricing,
@@ -29,7 +31,7 @@ def _model_pricing(**kw) -> ModelPricing:
     return ModelPricing(**defaults)
 
 
-def _cache(models: dict[str, ModelPricing] | None = None) -> PricingCache:
+def _cache(models: Optional[Dict[str, ModelPricing]] = None) -> PricingCache:
     return PricingCache(
         retrieved_at=_ts(),
         models=models or {},

@@ -9,6 +9,58 @@ from response_parser import Action, format_actions, parse_response
 
 
 # ---------------------------------------------------------------------------
+# plan タグ
+# ---------------------------------------------------------------------------
+
+class TestPlanTag:
+    """<plan> タグの解析テスト."""
+
+    def test_parse_plan_tag(self):
+        text = "<plan>1. サブタスク1\n2. サブタスク2</plan>"
+        actions = parse_response(text)
+        assert len(actions) == 1
+        assert actions[0].action_type == "plan"
+        assert "サブタスク1" in actions[0].content
+
+    def test_parse_plan_with_whitespace(self):
+        text = "<plan>  trimmed content  </plan>"
+        actions = parse_response(text)
+        assert actions[0].content == "trimmed content"
+
+    def test_parse_plan_empty_content(self):
+        text = "<plan>   </plan>"
+        actions = parse_response(text)
+        assert len(actions) == 1
+        assert actions[0].action_type == "plan"
+        assert actions[0].content == ""
+
+    def test_parse_plan_multiline(self):
+        text = "<plan>\n1. タスクA\n2. タスクB [depends:1]\n</plan>"
+        actions = parse_response(text)
+        assert actions[0].action_type == "plan"
+        assert "タスクA" in actions[0].content
+        assert "タスクB" in actions[0].content
+
+    def test_format_plan_roundtrip(self):
+        original = [Action(action_type="plan", content="1. タスク1\n2. タスク2")]
+        formatted = format_actions(original)
+        assert "<plan>" in formatted
+        assert "</plan>" in formatted
+        reparsed = parse_response(formatted)
+        assert reparsed == original
+
+    def test_plan_with_other_tags(self):
+        text = (
+            "<reply>分解します</reply>\n"
+            "<plan>1. ステップ1\n2. ステップ2</plan>"
+        )
+        actions = parse_response(text)
+        assert len(actions) == 2
+        assert actions[0].action_type == "reply"
+        assert actions[1].action_type == "plan"
+
+
+# ---------------------------------------------------------------------------
 # research タグ
 # ---------------------------------------------------------------------------
 
@@ -107,6 +159,7 @@ class TestMixedTags:
             Action(action_type="research", content="query"),
             Action(action_type="publish", content="artifact"),
             Action(action_type="consult", content="相談したいです"),
+            Action(action_type="plan", content="1. タスク1\n2. タスク2"),
             Action(action_type="done", content="finished"),
         ]
         formatted = format_actions(original)

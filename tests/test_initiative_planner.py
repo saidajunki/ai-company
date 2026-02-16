@@ -105,29 +105,15 @@ class TestPlan:
         assert len(result) == 1
         assert result[0].title == "OSSツール公開"
 
-    def test_generates_up_to_three_initiatives(self, tmp_path):
-        """最大3件のイニシアチブを生成する."""
-        planner, manager = _make_planner(tmp_path)
-        data = [
-            _default_initiative_data(title="施策A"),
-            _default_initiative_data(title="施策B"),
-            _default_initiative_data(title="施策C"),
-        ]
-        manager.llm_client.chat.return_value = _make_llm_response(data)
-
-        result = planner.plan()
-
-        assert len(result) == 3
-
-    def test_caps_at_three_even_if_llm_returns_more(self, tmp_path):
-        """LLMが4件以上返しても3件に制限する."""
+    def test_caps_at_one_per_cycle(self, tmp_path):
+        """LLMが複数件返しても1件に制限する (MAX_INITIATIVES_PER_CYCLE=1)."""
         planner, manager = _make_planner(tmp_path)
         data = [_default_initiative_data(title=f"施策{i}") for i in range(5)]
         manager.llm_client.chat.return_value = _make_llm_response(data)
 
         result = planner.plan()
 
-        assert len(result) <= 3
+        assert len(result) == 1
 
     def test_required_fields_present(self, tmp_path):
         """各イニシアチブに必須フィールドが含まれる."""
@@ -261,8 +247,8 @@ class TestPlan:
         assert len(result) == 1
         assert result[0].title == "有効な施策"
 
-    def test_mixed_consulting_and_planned(self, tmp_path):
-        """高コストと通常のイニシアチブが混在する場合."""
+    def test_first_initiative_selected_when_multiple_returned(self, tmp_path):
+        """LLMが複数返しても最初の1件のみ選択される."""
         planner, manager = _make_planner(tmp_path)
         data = [
             _default_initiative_data(title="高コスト施策", cost_efficiency=2),
@@ -272,9 +258,184 @@ class TestPlan:
 
         result = planner.plan()
 
-        assert len(result) == 2
+        assert len(result) == 1
+        assert result[0].title == "高コスト施策"
         assert result[0].status == "consulting"
-        assert result[1].status == "planned"
+
+
+class TestPlanRateLimiting:
+    """plan() のレート制限テスト (Requirements: 4.1, 4.2, 4.3, 4.4, 4.5)."""
+
+    def test_cooldown_blocks_second_call(self, tmp_path):
+        """クールダウン期間中は空リストを返す (Req 4.1, 4.2)."""
+        planner, manager = _make_planner(tmp_path)
+        data = [_default_initiative_data()]
+        manager.llm_client.chat.return_value = _make_llm_response(data)
+
+        # First call succeeds
+        result1 = planner.plan()
+        assert len(result1) == 1
+
+        # Second call within cooldown returns empty
+        # (the first call saved a "planned" initiative AND set _last_planned_at)
+        result2 = planner.plan()
+        assert result2 == []
+
+    def test_cooldown_expires_allows_planning(self, tmp_path):
+        """クールダウン期間経過後は計画可能 (Req 4.1, 4.5)."""
+        planner, manager = _make_planner(tmp_path)
+        data = [_default_initiative_data()]
+        manager.llm_client.chat.return_value = _make_llm_response(data)
+
+        # Simulate past planning
+        from datetime import timedelta
+        planner._last_planned_at = datetime.now(timezone.utc) - timedelta(minutes=31)
+
+        # Should be allowed (cooldown expired), but active initiative check may block
+        # So we need no active initiatives in the store
+        result = planner.plan()
+        assert len(result) == 1
+
+    def test_cooldown_not_expired_returns_empty(self, tmp_path):
+        """クールダウン未経過時は空リストを返す (Req 4.2)."""
+        planner, manager = _make_planner(tmp_path)
+        data = [_default_initiative_data()]
+        manager.llm_client.chat.return_value = _make_llm_response(data)
+
+        from datetime import timedelta
+        planner._last_planned_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+        result = planner.plan()
+        assert result == []
+        # LLM should NOT have been called
+        manager.llm_client.chat.assert_not_called()
+
+    def test_active_planned_initiative_blocks_planning(self, tmp_path):
+        """planned ステータスのイニシアチブが存在する場合はスキップ (Req 4.4)."""
+        planner, manager = _make_planner(tmp_path)
+        store = InitiativeStore(tmp_path, "test-co")
+
+        # Pre-save a planned initiative
+        existing = InitiativeEntry(
+            initiative_id="existing01",
+            title="既存施策",
+            description="進行中の施策",
+            status="planned",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        store.save(existing)
+
+        data = [_default_initiative_data()]
+        manager.llm_client.chat.return_value = _make_llm_response(data)
+
+        result = planner.plan()
+        assert result == []
+        manager.llm_client.chat.assert_not_called()
+
+    def test_active_in_progress_initiative_blocks_planning(self, tmp_path):
+        """in_progress ステータスのイニシアチブが存在する場合はスキップ (Req 4.4)."""
+        planner, manager = _make_planner(tmp_path)
+        store = InitiativeStore(tmp_path, "test-co")
+
+        existing = InitiativeEntry(
+            initiative_id="existing02",
+            title="進行中施策",
+            description="進行中の施策",
+            status="in_progress",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        store.save(existing)
+
+        data = [_default_initiative_data()]
+        manager.llm_client.chat.return_value = _make_llm_response(data)
+
+        result = planner.plan()
+        assert result == []
+
+    def test_completed_initiative_does_not_block(self, tmp_path):
+        """completed ステータスのイニシアチブは計画をブロックしない."""
+        planner, manager = _make_planner(tmp_path)
+        store = InitiativeStore(tmp_path, "test-co")
+
+        existing = InitiativeEntry(
+            initiative_id="done01",
+            title="完了施策",
+            description="完了した施策",
+            status="completed",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        store.save(existing)
+
+        data = [_default_initiative_data()]
+        manager.llm_client.chat.return_value = _make_llm_response(data)
+
+        result = planner.plan()
+        assert len(result) == 1
+
+    def test_consulting_initiative_does_not_block(self, tmp_path):
+        """consulting ステータスのイニシアチブは計画をブロックしない."""
+        planner, manager = _make_planner(tmp_path)
+        store = InitiativeStore(tmp_path, "test-co")
+
+        existing = InitiativeEntry(
+            initiative_id="consult01",
+            title="相談待ち施策",
+            description="相談待ちの施策",
+            status="consulting",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        store.save(existing)
+
+        data = [_default_initiative_data()]
+        manager.llm_client.chat.return_value = _make_llm_response(data)
+
+        result = planner.plan()
+        assert len(result) == 1
+
+    def test_max_one_initiative_per_cycle(self, tmp_path):
+        """1サイクルあたり最大1件のイニシアチブ (Req 4.3)."""
+        planner, manager = _make_planner(tmp_path)
+        data = [
+            _default_initiative_data(title="施策A"),
+            _default_initiative_data(title="施策B"),
+            _default_initiative_data(title="施策C"),
+        ]
+        manager.llm_client.chat.return_value = _make_llm_response(data)
+
+        result = planner.plan()
+        assert len(result) == 1
+        assert result[0].title == "施策A"
+
+    def test_last_planned_at_set_on_success(self, tmp_path):
+        """成功時に _last_planned_at が設定される (Req 4.5)."""
+        planner, manager = _make_planner(tmp_path)
+        assert planner._last_planned_at is None
+
+        data = [_default_initiative_data()]
+        manager.llm_client.chat.return_value = _make_llm_response(data)
+
+        planner.plan()
+        assert planner._last_planned_at is not None
+
+    def test_last_planned_at_not_set_on_empty_result(self, tmp_path):
+        """結果が空の場合は _last_planned_at が設定されない."""
+        planner, manager = _make_planner(tmp_path)
+        manager.llm_client = None
+
+        planner.plan()
+        assert planner._last_planned_at is None
+
+    def test_cooldown_constant_is_30_minutes(self):
+        """COOLDOWN_SECONDS が30分 (1800秒) であること."""
+        assert InitiativePlanner.COOLDOWN_SECONDS == 1800
+
+    def test_max_initiatives_constant_is_one(self):
+        """MAX_INITIATIVES_PER_CYCLE が1であること."""
+        assert InitiativePlanner.MAX_INITIATIVES_PER_CYCLE == 1
 
 
 class TestGenerateRetrospective:

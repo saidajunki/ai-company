@@ -14,7 +14,10 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+try:
+    from typing import Literal
+except ImportError:
+    from typing_extensions import Literal
 
 from agent_registry import AgentRegistry
 from autonomous_loop import AutonomousLoop
@@ -47,7 +50,7 @@ from pricing import (
 )
 from recovery import determine_recovery_action, RecoveryAction
 from report_formatter import CostSummary, ReportData, format_report
-from response_parser import Action, parse_response
+from response_parser import Action, parse_plan_content, parse_response
 from research_note_store import ResearchNoteStore
 from consultation_store import ConsultationStore
 from service_registry import ServiceRegistry
@@ -1149,10 +1152,54 @@ class Manager:
                     next_actions = parse_response(llm_result.content)
                     break  # Process new actions in next iteration
 
+                elif action.action_type == "plan":
+                    logger.info("Plan action received: %s", action.content[:120])
+                    # Extract original user message for parent task description
+                    user_msg = ""
+                    for msg in conversation:
+                        if msg.get("role") == "user":
+                            user_msg = msg.get("content", "")
+                            break
+                    task_desc = user_msg[:100] if user_msg else "タスク分解"
+                    self._handle_plan_action(action, task_description=task_desc)
+                    # plan does not trigger a follow-up LLM call; continue to next action
+
             # If no shell_command triggered a new LLM call, we're done
             if not next_actions:
                 break
             actions = next_actions
+
+    def _handle_plan_action(self, action: Action, task_description: str) -> None:
+        """<plan>アクションからサブタスクを登録する.
+
+        Args:
+            action: action_type="plan" のActionオブジェクト
+            task_description: 親タスクの説明に使うCreatorメッセージの要約
+        """
+        subtasks = parse_plan_content(action.content)
+
+        if not subtasks:
+            logger.warning("plan action contained no subtasks")
+            self._slack_send("⚠️ タスク分解: サブタスクが見つかりませんでした")
+            return
+
+        # 親タスクを登録
+        parent = self.task_queue.add(description=f"[親] {task_description}")
+
+        # サブタスクを依存関係付きで登録
+        task_id_map: dict[int, str] = {}  # plan内番号 → 実際のtask_id
+        for st in subtasks:
+            depends_on = [task_id_map[d] for d in st.depends_on_indices if d in task_id_map]
+            entry = self.task_queue.add_with_deps(
+                description=st.description,
+                depends_on=depends_on,
+                parent_task_id=parent.task_id,
+            )
+            task_id_map[st.index] = entry.task_id
+
+        # Creatorに報告
+        self._slack_send(f"📋 タスク分解完了 ({len(subtasks)}件のサブタスク)")
+
 
     # ------------------------------------------------------------------
     # Internal helpers

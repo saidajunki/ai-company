@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Literal
+try:
+    from typing import Literal
+except ImportError:
+    from typing_extensions import Literal
 
 
 # ---------------------------------------------------------------------------
@@ -20,10 +23,19 @@ from typing import Literal
 # ---------------------------------------------------------------------------
 
 @dataclass
+class PlannedSubtask:
+    """<plan>タグ内の個別サブタスク."""
+
+    index: int  # plan内の番号 (1-based)
+    description: str  # サブタスクの説明
+    depends_on_indices: list[int]  # 依存するplan内番号
+
+
+@dataclass
 class Action:
     """LLM応答から抽出されたアクション."""
 
-    action_type: Literal["shell_command", "reply", "done", "research", "publish", "consult", "delegate"]
+    action_type: Literal["shell_command", "reply", "done", "research", "publish", "consult", "delegate", "plan"]
     content: str
 
 
@@ -31,7 +43,7 @@ class Action:
 # Tag → action_type mapping
 # ---------------------------------------------------------------------------
 
-_TAG_TO_ACTION: dict[str, Literal["shell_command", "reply", "done", "research", "publish", "consult", "delegate"]] = {
+_TAG_TO_ACTION: dict[str, Literal["shell_command", "reply", "done", "research", "publish", "consult", "delegate", "plan"]] = {
     "shell": "shell_command",
     "reply": "reply",
     "done": "done",
@@ -39,6 +51,7 @@ _TAG_TO_ACTION: dict[str, Literal["shell_command", "reply", "done", "research", 
     "publish": "publish",
     "consult": "consult",
     "delegate": "delegate",
+    "plan": "plan",
 }
 
 _ACTION_TO_TAG: dict[str, str] = {v: k for k, v in _TAG_TO_ACTION.items()}
@@ -46,7 +59,7 @@ _ACTION_TO_TAG: dict[str, str] = {v: k for k, v in _TAG_TO_ACTION.items()}
 # Regex that matches any of the supported tags and captures inner content.
 # re.DOTALL so '.' matches newlines inside the tag body.
 _TAG_PATTERN = re.compile(
-    r"<(reply|shell|done|research|publish|consult|delegate)>\s*(.*?)\s*</\1>",
+    r"<(reply|shell|done|research|publish|consult|delegate|plan)>\s*(.*?)\s*</\1>",
     re.DOTALL,
 )
 
@@ -97,3 +110,50 @@ def format_actions(actions: list[Action]) -> str:
         parts.append(f"<{tag}>\n{action.content}\n</{tag}>")
 
     return "\n\n".join(parts)
+
+# ---------------------------------------------------------------------------
+# Plan content parser
+# ---------------------------------------------------------------------------
+
+# Pattern: "N. description [depends:M,K]" or "N. description"
+_PLAN_LINE_PATTERN = re.compile(
+    r"^\s*(\d+)\.\s+(.+?)(?:\s*\[depends:([\d,\s]+)\])?\s*$",
+)
+
+
+def parse_plan_content(content: str) -> list[PlannedSubtask]:
+    """<plan>タグ内のコンテンツをサブタスクリストにパースする.
+
+    各行を ``N. 説明文 [depends:M,K]`` 形式でパースする。
+    ``[depends:...]`` が省略された場合、直前のタスク (N-1) に依存する。
+    最初のタスク (index=1) は依存なし。
+    空行・不正行はスキップする。
+    """
+    subtasks: list[PlannedSubtask] = []
+
+    for line in content.splitlines():
+        match = _PLAN_LINE_PATTERN.match(line)
+        if not match:
+            continue
+
+        index = int(match.group(1))
+        description = match.group(2).strip()
+        depends_raw = match.group(3)
+
+        if depends_raw is not None:
+            # Explicit depends: parse comma-separated indices
+            depends_on = [int(d.strip()) for d in depends_raw.split(",") if d.strip()]
+        elif subtasks:
+            # Implicit: depend on previous task
+            depends_on = [subtasks[-1].index]
+        else:
+            # First task: no dependencies
+            depends_on = []
+
+        subtasks.append(PlannedSubtask(
+            index=index,
+            description=description,
+            depends_on_indices=depends_on,
+        ))
+
+    return subtasks

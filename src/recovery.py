@@ -13,7 +13,10 @@ Requirements: 10.4, 10.5
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+try:
+    from typing import Literal
+except ImportError:
+    from typing_extensions import Literal
 
 from manager_state import ManagerState
 

@@ -34,6 +34,9 @@ _HIGH_COST_THRESHOLD = 5
 class InitiativePlanner:
     """ビジョン・憲法・戦略方針・過去実績に基づいてイニシアチブを計画する."""
 
+    COOLDOWN_SECONDS = 30 * 60  # 30分
+    MAX_INITIATIVES_PER_CYCLE = 1
+
     def __init__(
         self,
         manager: Manager,
@@ -43,20 +46,37 @@ class InitiativePlanner:
         self._manager = manager
         self._initiative_store = initiative_store
         self._strategy_analyzer = strategy_analyzer
+        self._last_planned_at: datetime | None = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def plan(self) -> list[InitiativeEntry]:
-        """ビジョン・憲法・戦略方針・過去実績に基づいてイニシアチブを1〜3件計画する.
+        """ビジョン・憲法・戦略方針・過去実績に基づいてイニシアチブを計画する.
 
-        各イニシアチブを Initiative_Store に保存し、
-        最初の一手のタスクをタスクキューに追加する。
-        想定コストが予算上限の50%を超える場合は相談待ちにする。
+        クールダウン期間中、またはアクティブなイニシアチブが存在する場合は
+        空リストを返す。1サイクルあたり最大1件のイニシアチブを生成する。
         """
+        # クールダウンチェック
+        if self._last_planned_at is not None:
+            elapsed = (datetime.now(timezone.utc) - self._last_planned_at).total_seconds()
+            if elapsed < self.COOLDOWN_SECONDS:
+                logger.info("Initiative cooldown active (%d/%d sec)", elapsed, self.COOLDOWN_SECONDS)
+                return []
+
+        # アクティブイニシアチブチェック
+        active = self._initiative_store.list_by_status("planned") + \
+                 self._initiative_store.list_by_status("in_progress")
+        if active:
+            logger.info("Active initiatives exist (%d), skipping planning", len(active))
+            return []
+
         try:
-            return self._plan_impl()
+            result = self._plan_impl()
+            if result:
+                self._last_planned_at = datetime.now(timezone.utc)
+            return result
         except Exception:
             logger.exception("Initiative planning failed")
             return []
@@ -149,6 +169,9 @@ class InitiativePlanner:
         if not initiatives:
             logger.warning("No initiatives parsed from LLM response")
             return []
+
+        # Limit to MAX_INITIATIVES_PER_CYCLE (1件)
+        initiatives = initiatives[:self.MAX_INITIATIVES_PER_CYCLE]
 
         # Budget check and save
         budget_limit = 10.0

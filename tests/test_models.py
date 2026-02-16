@@ -421,6 +421,123 @@ class TestTaskEntry:
         restored = TaskEntry.model_validate_json(t.model_dump_json())
         assert restored == t
 
+    # --- retry_count, max_retries, parent_task_id フィールドのテスト ---
+
+    def test_new_fields_defaults(self):
+        """新フィールドのデフォルト値を検証 (Req 3.1, 3.2, 3.3)."""
+        t = TaskEntry(
+            task_id="t-10",
+            description="デフォルト確認",
+            status="pending",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        assert t.retry_count == 0
+        assert t.max_retries == 3
+        assert t.parent_task_id is None
+
+    def test_new_fields_custom_values(self):
+        """新フィールドにカスタム値を設定できることを検証."""
+        t = TaskEntry(
+            task_id="t-11",
+            description="カスタム値",
+            status="pending",
+            created_at=NOW,
+            updated_at=NOW,
+            retry_count=2,
+            max_retries=5,
+            parent_task_id="parent-1",
+        )
+        assert t.retry_count == 2
+        assert t.max_retries == 5
+        assert t.parent_task_id == "parent-1"
+
+    def test_retry_count_le_max_retries_valid(self):
+        """retry_count == max_retries は許可される (Req 3.5)."""
+        t = TaskEntry(
+            task_id="t-12",
+            description="境界値",
+            status="failed",
+            created_at=NOW,
+            updated_at=NOW,
+            retry_count=3,
+            max_retries=3,
+        )
+        assert t.retry_count == t.max_retries
+
+    def test_retry_count_exceeds_max_retries_rejected(self):
+        """retry_count > max_retries はバリデーションエラー (Req 3.5)."""
+        with pytest.raises(ValidationError, match="retry_count"):
+            TaskEntry(
+                task_id="t-13",
+                description="不正",
+                status="failed",
+                created_at=NOW,
+                updated_at=NOW,
+                retry_count=4,
+                max_retries=3,
+            )
+
+    def test_negative_retry_count_rejected(self):
+        """retry_count < 0 はバリデーションエラー (Req 3.1)."""
+        with pytest.raises(ValidationError):
+            TaskEntry(
+                task_id="t-14",
+                description="負のリトライ",
+                status="pending",
+                created_at=NOW,
+                updated_at=NOW,
+                retry_count=-1,
+            )
+
+    def test_negative_max_retries_rejected(self):
+        """max_retries < 0 はバリデーションエラー (Req 3.2)."""
+        with pytest.raises(ValidationError):
+            TaskEntry(
+                task_id="t-15",
+                description="負の最大リトライ",
+                status="pending",
+                created_at=NOW,
+                updated_at=NOW,
+                max_retries=-1,
+            )
+
+    def test_backward_compatibility_without_new_fields(self):
+        """既存データ（新フィールドなし）からのデシリアライズ (Req 3.4)."""
+        legacy_data = {
+            "task_id": "t-legacy",
+            "description": "レガシータスク",
+            "priority": 2,
+            "status": "completed",
+            "created_at": NOW.isoformat(),
+            "updated_at": NOW.isoformat(),
+            "result": "done",
+            "agent_id": "ceo",
+            "depends_on": [],
+        }
+        t = TaskEntry.model_validate(legacy_data)
+        assert t.retry_count == 0
+        assert t.max_retries == 3
+        assert t.parent_task_id is None
+
+    def test_json_round_trip_with_new_fields(self):
+        """新フィールド含むJSON往復テスト."""
+        t = TaskEntry(
+            task_id="t-16",
+            description="新フィールド往復",
+            status="running",
+            created_at=NOW,
+            updated_at=NOW,
+            retry_count=1,
+            max_retries=5,
+            parent_task_id="parent-abc",
+        )
+        restored = TaskEntry.model_validate_json(t.model_dump_json())
+        assert restored == t
+        assert restored.retry_count == 1
+        assert restored.max_retries == 5
+        assert restored.parent_task_id == "parent-abc"
+
 
 # --- AgentEntry ---
 

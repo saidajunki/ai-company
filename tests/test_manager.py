@@ -1,5 +1,7 @@
 """Unit tests for Manager orchestration layer (Task 13.1)."""
 
+from __future__ import annotations
+
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
@@ -893,3 +895,243 @@ class TestProcessMessageInitiativeContext:
         # Should not raise
         mgr.process_message("テスト", user_id="U123")
         assert mock_llm.chat.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# _handle_plan_action (Task 9.1)
+# ---------------------------------------------------------------------------
+
+from response_parser import Action
+from unittest.mock import MagicMock
+
+
+class TestHandlePlanAction:
+    """Tests for Manager._handle_plan_action."""
+
+    def _make_manager(self, tmp_path: Path) -> Manager:
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        mgr.slack = MagicMock()
+        return mgr
+
+    def test_registers_parent_and_subtasks(self, tmp_path: Path):
+        mgr = self._make_manager(tmp_path)
+        action = Action(
+            action_type="plan",
+            content="1. サブタスクA\n2. サブタスクB [depends:1]\n3. サブタスクC [depends:1,2]",
+        )
+        mgr._handle_plan_action(action, task_description="テスト指示")
+
+        all_tasks = mgr.task_queue.list_all()
+        # 1 parent + 3 subtasks
+        assert len(all_tasks) == 4
+
+        parent = [t for t in all_tasks if t.description.startswith("[親]")]
+        assert len(parent) == 1
+        assert "テスト指示" in parent[0].description
+
+        children = mgr.task_queue.list_by_parent(parent[0].task_id)
+        assert len(children) == 3
+
+    def test_subtask_dependencies_are_mapped(self, tmp_path: Path):
+        mgr = self._make_manager(tmp_path)
+        action = Action(
+            action_type="plan",
+            content="1. タスクA\n2. タスクB [depends:1]",
+        )
+        mgr._handle_plan_action(action, task_description="依存テスト")
+
+        all_tasks = mgr.task_queue.list_all()
+        parent = [t for t in all_tasks if t.description.startswith("[親]")][0]
+        children = mgr.task_queue.list_by_parent(parent.task_id)
+        children.sort(key=lambda t: t.description)
+
+        task_a = [c for c in children if "タスクA" in c.description][0]
+        task_b = [c for c in children if "タスクB" in c.description][0]
+
+        assert task_a.depends_on == []
+        assert task_b.depends_on == [task_a.task_id]
+
+    def test_subtasks_have_pending_status(self, tmp_path: Path):
+        mgr = self._make_manager(tmp_path)
+        action = Action(
+            action_type="plan",
+            content="1. タスクX\n2. タスクY",
+        )
+        mgr._handle_plan_action(action, task_description="ステータステスト")
+
+        all_tasks = mgr.task_queue.list_all()
+        for t in all_tasks:
+            assert t.status == "pending"
+
+    def test_reports_summary_to_creator(self, tmp_path: Path):
+        mgr = self._make_manager(tmp_path)
+        action = Action(
+            action_type="plan",
+            content="1. タスク1\n2. タスク2\n3. タスク3",
+        )
+        mgr._handle_plan_action(action, task_description="報告テスト")
+
+        mgr.slack.send_message.assert_called_once()
+        msg = mgr.slack.send_message.call_args[0][0]
+        assert "3件のサブタスク" in msg
+        assert "📋" in msg
+
+    def test_empty_plan_reports_warning(self, tmp_path: Path):
+        mgr = self._make_manager(tmp_path)
+        action = Action(
+            action_type="plan",
+            content="",
+        )
+        mgr._handle_plan_action(action, task_description="空テスト")
+
+        # No tasks should be registered
+        all_tasks = mgr.task_queue.list_all()
+        assert len(all_tasks) == 0
+
+        # Warning sent to creator
+        mgr.slack.send_message.assert_called_once()
+        msg = mgr.slack.send_message.call_args[0][0]
+        assert "サブタスクが見つかりませんでした" in msg
+
+    def test_invalid_plan_content_reports_warning(self, tmp_path: Path):
+        mgr = self._make_manager(tmp_path)
+        action = Action(
+            action_type="plan",
+            content="これはサブタスクではない\nただのテキスト",
+        )
+        mgr._handle_plan_action(action, task_description="不正テスト")
+
+        all_tasks = mgr.task_queue.list_all()
+        assert len(all_tasks) == 0
+
+        mgr.slack.send_message.assert_called_once()
+        msg = mgr.slack.send_message.call_args[0][0]
+        assert "サブタスクが見つかりませんでした" in msg
+
+
+# ---------------------------------------------------------------------------
+# Plan action in _execute_action_loop (Task 9.2)
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteActionLoopPlan:
+    """Tests for plan action handling inside _execute_action_loop."""
+
+    def _make_manager(self, tmp_path: Path) -> Manager:
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        mgr.slack = MagicMock()
+        mgr.llm_client = MagicMock()
+        return mgr
+
+    def test_plan_action_calls_handle_plan_action(self, tmp_path: Path):
+        mgr = self._make_manager(tmp_path)
+        plan_action = Action(
+            action_type="plan",
+            content="1. サブタスクA\n2. サブタスクB [depends:1]",
+        )
+        conversation = [
+            {"role": "system", "content": "システムプロンプト"},
+            {"role": "user", "content": "新しいWebサイトを作って"},
+        ]
+        mgr._execute_action_loop([plan_action], conversation, task_id="t-1")
+
+        # Subtasks should be registered via _handle_plan_action
+        all_tasks = mgr.task_queue.list_all()
+        assert len(all_tasks) == 3  # 1 parent + 2 subtasks
+
+    def test_plan_action_extracts_user_message_for_description(self, tmp_path: Path):
+        mgr = self._make_manager(tmp_path)
+        plan_action = Action(
+            action_type="plan",
+            content="1. ステップ1\n2. ステップ2",
+        )
+        conversation = [
+            {"role": "system", "content": "システムプロンプト"},
+            {"role": "user", "content": "ECサイトの構築をお願いします"},
+        ]
+        mgr._execute_action_loop([plan_action], conversation, task_id="t-1")
+
+        all_tasks = mgr.task_queue.list_all()
+        parent = [t for t in all_tasks if t.description.startswith("[親]")]
+        assert len(parent) == 1
+        assert "ECサイトの構築をお願いします" in parent[0].description
+
+    def test_plan_action_truncates_long_user_message(self, tmp_path: Path):
+        mgr = self._make_manager(tmp_path)
+        plan_action = Action(
+            action_type="plan",
+            content="1. タスク1",
+        )
+        long_msg = "あ" * 200
+        conversation = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": long_msg},
+        ]
+        mgr._execute_action_loop([plan_action], conversation, task_id="t-1")
+
+        all_tasks = mgr.task_queue.list_all()
+        parent = [t for t in all_tasks if t.description.startswith("[親]")]
+        assert len(parent) == 1
+        # Description should be truncated to 100 chars
+        desc_without_prefix = parent[0].description.replace("[親] ", "")
+        assert len(desc_without_prefix) <= 100
+
+    def test_plan_action_does_not_trigger_llm_followup(self, tmp_path: Path):
+        mgr = self._make_manager(tmp_path)
+        plan_action = Action(
+            action_type="plan",
+            content="1. タスクA\n2. タスクB",
+        )
+        conversation = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "テスト"},
+        ]
+        mgr._execute_action_loop([plan_action], conversation, task_id="t-1")
+
+        # LLM should NOT be called after plan action
+        mgr.llm_client.chat.assert_not_called()
+
+    def test_plan_action_fallback_description_when_no_user_message(self, tmp_path: Path):
+        mgr = self._make_manager(tmp_path)
+        plan_action = Action(
+            action_type="plan",
+            content="1. タスク1",
+        )
+        # Conversation with no user message
+        conversation = [
+            {"role": "system", "content": "sys"},
+        ]
+        mgr._execute_action_loop([plan_action], conversation, task_id="t-1")
+
+        all_tasks = mgr.task_queue.list_all()
+        parent = [t for t in all_tasks if t.description.startswith("[親]")]
+        assert len(parent) == 1
+        assert "タスク分解" in parent[0].description
+
+    def test_plan_action_with_other_actions(self, tmp_path: Path):
+        """Plan action followed by a reply action should both be processed."""
+        mgr = self._make_manager(tmp_path)
+        plan_action = Action(
+            action_type="plan",
+            content="1. タスクA\n2. タスクB",
+        )
+        reply_action = Action(
+            action_type="reply",
+            content="タスクを分解しました",
+        )
+        conversation = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "テスト"},
+        ]
+        mgr._execute_action_loop([plan_action, reply_action], conversation, task_id="t-1")
+
+        # Plan subtasks registered
+        all_tasks = mgr.task_queue.list_all()
+        assert len(all_tasks) == 3  # 1 parent + 2 subtasks
+
+        # Reply also sent (slack called for plan summary + reply)
+        slack_calls = mgr.slack.send_message.call_args_list
+        messages = [c[0][0] for c in slack_calls]
+        assert any("タスクを分解しました" in m for m in messages)

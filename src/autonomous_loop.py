@@ -9,13 +9,15 @@ Requirements: 3.2, 3.3, 3.4, 3.5, 3.6, 3.7
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import TYPE_CHECKING
 
+from artifact_verifier import ArtifactVerifier
+from context_builder import TaskHistoryContext, _build_task_history_section
 from llm_client import LLMError
 from models import TaskEntry
 from response_parser import parse_response
+from shell_command_tracker import ShellCommandTracker
 from shell_executor import execute_shell
 
 if TYPE_CHECKING:
@@ -43,6 +45,9 @@ class AutonomousLoop:
         5. 結果を報告
         """
         try:
+            # 0. Retry failed tasks
+            self._retry_failed_tasks()
+
             # 1. WIP check
             running = self.manager.task_queue.list_by_status("running")
             wip_limit = self._get_wip_limit()
@@ -263,27 +268,41 @@ class AutonomousLoop:
 
         work_dir = self.manager.base_dir / "companies" / self.manager.company_id
 
+        # Build task history context (Requirements 5.1, 5.2)
+        try:
+            task_history = TaskHistoryContext(
+                completed=self.manager.task_queue.list_by_status("completed")[-10:],
+                failed=self.manager.task_queue.list_by_status("failed")[-5:],
+                running=self.manager.task_queue.list_by_status("running"),
+            )
+            task_history_text = _build_task_history_section(task_history)
+        except Exception:
+            logger.warning("Failed to build task history context", exc_info=True)
+            task_history_text = ""
+
+        system_content = (
+            "あなたはAI会社の社長AIです。タスクを実行してください。\n"
+            "シェルコマンドが必要な場合は<shell>コマンド</shell>で指示してください。\n"
+            "Creatorに相談が必要な場合は<consult>相談内容</consult>で送ってください。\n"
+            "完了したら<done>結果の要約</done>で報告してください。"
+        )
+        if task_history_text:
+            system_content += "\n\n" + task_history_text
+
         messages: list[dict[str, str]] = [
-            {
-                "role": "system",
-                "content": (
-                    "あなたはAI会社の社長AIです。タスクを実行してください。\n"
-                    "シェルコマンドが必要な場合は<shell>コマンド</shell>で指示してください。\n"
-                    "Creatorに相談が必要な場合は<consult>相談内容</consult>で送ってください。\n"
-                    "完了したら<done>結果の要約</done>で報告してください。"
-                ),
-            },
+            {"role": "system", "content": system_content},
             {"role": "user", "content": f"タスク: {task.description}"},
         ]
 
         try:
-            had_shell = False
+            shell_tracker = ShellCommandTracker()
             for _turn in range(MAX_TASK_TURNS):
                 # Budget check each turn
                 if self.manager.check_budget():
                     self.manager.task_queue.update_status(
                         task.task_id, "failed", error="予算超過"
                     )
+                    self._check_parent_completion(task)
                     self._report(f"タスク中断(予算超過): {task.description}")
                     return
 
@@ -293,6 +312,7 @@ class AutonomousLoop:
                     self.manager.task_queue.update_status(
                         task.task_id, "failed", error=result.message
                     )
+                    self._check_parent_completion(task)
                     self._report(f"タスク失敗(LLMエラー): {task.description}")
                     return
 
@@ -333,10 +353,11 @@ class AutonomousLoop:
                         self.manager.task_queue.update_status(
                             task.task_id, "failed", error="相談待ち"
                         )
+                        self._check_parent_completion(task)
                         return
                     elif action.action_type == "shell_command":
-                        had_shell = True
                         shell_result = execute_shell(command=action.content, cwd=work_dir)
+                        shell_tracker.record(action.content, shell_result.return_code)
                         result_text = (
                             f"コマンド実行結果 (return_code={shell_result.return_code}):\n"
                         )
@@ -367,10 +388,39 @@ class AutonomousLoop:
                         break
 
                 if done_result is not None:
-                    # Quality gate: verify output if shell commands were used
+                    # Step 1: Shell command all-failed check (Req 2.2, 2.3)
+                    if shell_tracker.had_any_commands() and shell_tracker.all_failed():
+                        failed_cmds = shell_tracker.failed_commands()
+                        error_msg = "全シェルコマンドが失敗: " + "; ".join(
+                            f"{r.command} (rc={r.return_code})" for r in failed_cmds
+                        )
+                        self.manager.task_queue.update_status(
+                            task.task_id, "failed", error=error_msg
+                        )
+                        self._check_parent_completion(task)
+                        self._report(f"タスク失敗(全コマンド失敗): {task.description}\n{error_msg}")
+                        return
+
+                    # Step 2: Artifact verification (Req 3.1, 3.2, 3.3)
+                    artifact_verifier = ArtifactVerifier(work_dir)
+                    all_text = done_result + "\n" + "\n".join(
+                        m.get("content", "") for m in messages
+                    )
+                    artifact_paths = artifact_verifier.extract_file_paths(all_text)
+                    if artifact_paths:
+                        artifact_result = artifact_verifier.verify(artifact_paths)
+                        if not artifact_result.all_exist:
+                            error_msg = "成果物が見つかりません: " + ", ".join(artifact_result.missing)
+                            self.manager.task_queue.update_status(
+                                task.task_id, "failed", error=error_msg
+                            )
+                            self._check_parent_completion(task)
+                            self._report(f"タスク失敗(成果物欠損): {task.description}\n{error_msg}")
+                            return
+
+                    # Step 3: Quality Gate - always active (Req 1.1, 5.1, 5.2)
                     q_score, q_notes = None, None
-                    enable_quality_gate = os.environ.get("TASK_QUALITY_GATE", "0") == "1"
-                    if had_shell and enable_quality_gate:
+                    if shell_tracker.had_any_commands():
                         try:
                             q_score, q_notes = self._verify_task_output(task, messages)
                         except Exception:
@@ -383,6 +433,7 @@ class AutonomousLoop:
                             quality_score=q_score,
                             quality_notes=q_notes,
                         )
+                        self._check_parent_completion(task)
                         self._report(
                             f"タスク品質不足: {task.description}\n"
                             f"スコア: {q_score:.2f} — {q_notes}"
@@ -395,6 +446,7 @@ class AutonomousLoop:
                         )
                         self._report(f"タスク完了: {task.description}\n結果: {done_result}")
                         self._check_initiative_completion(task.task_id)
+                        self._check_parent_completion(task)
                     return
 
                 if not needs_followup:
@@ -404,12 +456,14 @@ class AutonomousLoop:
                     )
                     self._report(f"タスク完了: {task.description}")
                     self._check_initiative_completion(task.task_id)
+                    self._check_parent_completion(task)
                     return
 
             # Max turns reached
             self.manager.task_queue.update_status(
                 task.task_id, "failed", error="最大ターン数到達"
             )
+            self._check_parent_completion(task)
             self._report(f"タスク中断(最大ターン数): {task.description}")
 
         except Exception as exc:
@@ -420,6 +474,7 @@ class AutonomousLoop:
                 )
             except Exception:
                 logger.warning("Failed to update task status to failed", exc_info=True)
+            self._check_parent_completion(task)
             self._report(f"タスク失敗(エラー): {task.description}")
 
     def _get_wip_limit(self) -> int:
@@ -433,13 +488,13 @@ class AutonomousLoop:
         return DEFAULT_WIP_LIMIT
     def _verify_task_output(
         self, task: TaskEntry, conversation: list[dict[str, str]]
-    ) -> tuple[float, str]:
+    ) -> tuple[float | None, str]:
         """LLMにタスク成果物の品質を評価させる.
 
-        Returns (score, notes). On LLM failure returns (1.0, "verification skipped").
+        Returns (score, notes). On LLM failure returns (None, "verification skipped: ...").
         """
         if self.manager.llm_client is None:
-            return 1.0, "verification skipped: no LLM client"
+            return None, "verification skipped: no LLM client"
 
         # Build a compact summary of the conversation for review
         summary_parts: list[str] = []
@@ -469,11 +524,11 @@ class AutonomousLoop:
             result = self.manager.llm_client.chat(messages)
         except Exception:
             logger.warning("Quality verification LLM call failed", exc_info=True)
-            return 1.0, "verification skipped: LLM call exception"
+            return None, "verification skipped: LLM call exception"
 
         if isinstance(result, LLMError):
             logger.warning("Quality verification LLM error: %s", result.message)
-            return 1.0, "verification skipped: LLM error"
+            return None, "verification skipped: LLM error"
 
         # Record cost
         try:
@@ -513,6 +568,44 @@ class AutonomousLoop:
             self.manager._slack_send(message)
         except Exception:
             logger.warning("Failed to send report: %s", message, exc_info=True)
+
+    def _retry_failed_tasks(self) -> None:
+        """リトライ可能な失敗タスクをpendingに戻す."""
+        failed = self.manager.task_queue.list_by_status("failed")
+        for task in sorted(failed, key=lambda t: t.priority):
+            if task.retry_count < task.max_retries:
+                logger.info(
+                    "Retrying task %s (retry %d/%d, error: %s)",
+                    task.task_id,
+                    task.retry_count + 1,
+                    task.max_retries,
+                    task.error,
+                )
+                self.manager.task_queue.update_status_for_retry(
+                    task.task_id, retry_count=task.retry_count + 1
+                )
+            else:
+                self._escalate_to_creator(task)
+
+    def _escalate_to_creator(self, task: TaskEntry) -> None:
+        """max_retries到達タスクをCreatorにエスカレーションする."""
+        content = (
+            f"タスク '{task.description}' が{task.max_retries}回リトライ後も失敗しました。\n"
+            f"最終エラー: {task.error or '不明'}\n"
+            f"task_id: {task.task_id}"
+        )
+        try:
+            entry = self.manager.consultation_store.add(
+                content,
+                related_task_id=task.task_id,
+            )
+            self._report(
+                f"🚨 エスカレーション [consult_id: {entry.consultation_id}]\n\n{content}"
+            )
+        except Exception:
+            logger.warning("Failed to escalate task %s", task.task_id, exc_info=True)
+            self._report(f"🚨 エスカレーション\n\n{content}")
+
     def _check_initiative_completion(self, task_id: str) -> None:
         """タスク完了時にイニシアチブの全タスク完了を検知し、振り返りを生成する."""
         initiative_store = getattr(self.manager, "initiative_store", None)
@@ -568,5 +661,29 @@ class AutonomousLoop:
                         self._report(f"🎉 イニシアチブ完了: {initiative.title}")
         except Exception:
             logger.exception("Error checking initiative completion for task %s", task_id)
+    def _check_parent_completion(self, task: TaskEntry) -> None:
+        """サブタスク完了/失敗時に親タスクの状態を更新する."""
+        if task.parent_task_id is None:
+            return
+        try:
+            siblings = self.manager.task_queue.list_by_parent(task.parent_task_id)
+            # 全サブタスク完了なら親をcompletedに
+            if all(s.status == "completed" for s in siblings):
+                self.manager.task_queue.update_status(
+                    task.parent_task_id, "completed", result="全サブタスク完了"
+                )
+                return
+            # 永久失敗サブタスク（retry_count >= max_retries）があれば親をfailedに
+            if any(
+                s.status == "failed" and s.retry_count >= s.max_retries
+                for s in siblings
+            ):
+                self.manager.task_queue.update_status(
+                    task.parent_task_id, "failed", error="サブタスク永久失敗"
+                )
+        except Exception:
+            logger.exception(
+                "Error checking parent completion for task %s", task.task_id
+            )
 
 
