@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_WIP_LIMIT = 3
-MAX_TASK_TURNS = 5
+MAX_TASK_TURNS = 50
 
 
 class AutonomousLoop:

@@ -271,6 +271,7 @@ class Manager:
             Formatted Markdown report string.
         """
         now = datetime.now(timezone.utc)
+        from datetime import timedelta
 
         # Cost summary
         spent = compute_window_cost(self.state.ledger_events, now)
@@ -314,10 +315,78 @@ class Manager:
         except Exception:
             logger.warning("Failed to get services for report", exc_info=True)
 
+        # --- Build delta_description from recent activity ---
+        delta_parts: list[str] = []
+        window_start = now - timedelta(minutes=10)
+
+        # Count recent LLM calls and shell execs
+        recent_llm = 0
+        recent_shell = 0
+        for ev in self.state.ledger_events:
+            if ev.timestamp >= window_start:
+                if ev.event_type == "llm_call":
+                    recent_llm += 1
+                elif ev.event_type == "shell_exec":
+                    recent_shell += 1
+
+        if recent_llm > 0:
+            delta_parts.append(f"LLM呼び出し {recent_llm}回")
+        if recent_shell > 0:
+            delta_parts.append(f"シェル実行 {recent_shell}回")
+
+        # Recently completed tasks
+        try:
+            completed = self.task_queue.list_by_status("completed")
+            recent_completed = [
+                t for t in completed if t.updated_at >= window_start
+            ]
+            for t in recent_completed[:3]:
+                delta_parts.append(f"完了: {t.description}")
+        except Exception:
+            logger.warning("Failed to get completed tasks for report", exc_info=True)
+
+        # Recently failed tasks
+        try:
+            failed = self.task_queue.list_by_status("failed")
+            recent_failed = [
+                t for t in failed if t.updated_at >= window_start
+            ]
+            for t in recent_failed[:2]:
+                reason = t.error or "不明"
+                delta_parts.append(f"失敗: {t.description} ({reason})")
+        except Exception:
+            logger.warning("Failed to get failed tasks for report", exc_info=True)
+
+        if not delta_parts:
+            delta_description = "特筆すべき活動なし"
+        else:
+            delta_description = " / ".join(delta_parts)
+
+        # --- Build next_plan from pending tasks ---
+        next_parts: list[str] = []
+        try:
+            pending = self.task_queue.list_by_status("pending")
+            pending.sort(key=lambda t: t.priority)
+            for t in pending[:3]:
+                next_parts.append(t.description)
+        except Exception:
+            logger.warning("Failed to get pending tasks for report", exc_info=True)
+
+        if running_tasks:
+            next_plan = "実行中タスクを継続"
+            if next_parts:
+                next_plan += f" → 次: {next_parts[0]}"
+        elif next_parts:
+            next_plan = " / ".join(next_parts)
+        else:
+            next_plan = "新規タスクの提案を検討"
+
         data = ReportData(
             timestamp=now,
             company_id=self.company_id,
             wip=list(self.state.wip),
+            delta_description=delta_description,
+            next_plan=next_plan,
             cost=cost_summary,
             running_tasks=running_tasks,
             active_agents=active_agents,
