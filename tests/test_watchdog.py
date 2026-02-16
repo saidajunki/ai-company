@@ -152,17 +152,26 @@ class TestMain:
     })
     @patch("watchdog.notify_slack", return_value=True)
     @patch("watchdog.restart_container", return_value=(True, "my-container"))
-    @patch("watchdog.check_heartbeat", return_value=True)
+    @patch("watchdog.request_manager_restart", return_value=(False, "no-docker"))
+    @patch("watchdog.heartbeat_is_stale", return_value=(True, 21.0))
+    @patch("watchdog.read_heartbeat", return_value={"updated_at": "2020-01-01T00:00:00+00:00"})
     def test_stale_triggers_restart_and_notify(
-        self, mock_check: MagicMock, mock_restart: MagicMock, mock_notify: MagicMock,
+        self,
+        mock_read: MagicMock,
+        mock_is_stale: MagicMock,
+        mock_request_restart: MagicMock,
+        mock_restart: MagicMock,
+        mock_notify: MagicMock,
     ):
         watchdog.main()
-        mock_check.assert_called_once_with("/tmp/hb.json")
+        mock_read.assert_called_once()
+        mock_is_stale.assert_called_once()
+        mock_request_restart.assert_called_once()
         mock_restart.assert_called_once_with("my-container")
-        mock_notify.assert_called_once()
-        # Verify the message mentions the container name
-        msg = mock_notify.call_args[0][1]
-        assert "my-container" in msg
+        assert mock_notify.call_count == 2
+        # Verify at least one message mentions the container name
+        msgs = [c.args[1] for c in mock_notify.call_args_list]
+        assert any("my-container" in m for m in msgs)
 
     @patch.dict("os.environ", {
         "HEARTBEAT_PATH": "/tmp/hb.json",
@@ -170,20 +179,44 @@ class TestMain:
     })
     @patch("watchdog.notify_slack")
     @patch("watchdog.restart_container")
-    @patch("watchdog.check_heartbeat", return_value=False)
+    @patch("watchdog.request_manager_restart")
+    @patch("watchdog.heartbeat_is_stale", return_value=(False, 1.0))
+    @patch("watchdog.read_heartbeat", return_value={"updated_at": "2020-01-01T00:00:00+00:00"})
     def test_fresh_does_nothing(
-        self, mock_check: MagicMock, mock_restart: MagicMock, mock_notify: MagicMock,
+        self,
+        mock_read: MagicMock,
+        mock_is_stale: MagicMock,
+        mock_request_restart: MagicMock,
+        mock_restart: MagicMock,
+        mock_notify: MagicMock,
     ):
         watchdog.main()
-        mock_check.assert_called_once()
+        mock_read.assert_called_once()
+        mock_is_stale.assert_called_once()
+        mock_request_restart.assert_not_called()
         mock_restart.assert_not_called()
         mock_notify.assert_not_called()
 
     @patch.dict("os.environ", {"HEARTBEAT_PATH": "", "SLACK_WEBHOOK_URL": ""}, clear=False)
-    @patch("watchdog.check_heartbeat")
-    def test_missing_heartbeat_path_returns_early(self, mock_check: MagicMock):
+    @patch("watchdog.read_heartbeat", return_value={"updated_at": "2020-01-01T00:00:00+00:00"})
+    @patch("watchdog.heartbeat_is_stale", return_value=(False, 0.1))
+    @patch("watchdog.request_manager_restart")
+    @patch("watchdog.restart_container")
+    @patch("watchdog.notify_slack")
+    def test_missing_heartbeat_path_still_checks_and_exits(
+        self,
+        mock_notify: MagicMock,
+        mock_restart: MagicMock,
+        mock_request_restart: MagicMock,
+        mock_is_stale: MagicMock,
+        mock_read: MagicMock,
+    ):
         watchdog.main()
-        mock_check.assert_not_called()
+        mock_read.assert_called_once()
+        mock_is_stale.assert_called_once()
+        mock_request_restart.assert_not_called()
+        mock_restart.assert_not_called()
+        mock_notify.assert_not_called()
 
     @patch.dict("os.environ", {
         "HEARTBEAT_PATH": "/tmp/hb.json",
@@ -192,12 +225,20 @@ class TestMain:
     })
     @patch("watchdog.notify_slack", return_value=True)
     @patch("watchdog.restart_container", return_value=(False, "permission denied"))
-    @patch("watchdog.check_heartbeat", return_value=True)
+    @patch("watchdog.request_manager_restart", return_value=(False, "no-docker"))
+    @patch("watchdog.heartbeat_is_stale", return_value=(True, 21.0))
+    @patch("watchdog.read_heartbeat", return_value={"updated_at": "2020-01-01T00:00:00+00:00"})
     def test_restart_failure_notifies_with_error(
-        self, mock_check: MagicMock, mock_restart: MagicMock, mock_notify: MagicMock,
+        self,
+        mock_read: MagicMock,
+        mock_is_stale: MagicMock,
+        mock_request_restart: MagicMock,
+        mock_restart: MagicMock,
+        mock_notify: MagicMock,
     ):
         watchdog.main()
-        msg = mock_notify.call_args[0][1]
+        assert mock_notify.call_count == 2
+        msg = mock_notify.call_args_list[-1].args[1]
         assert "失敗" in msg
         assert "permission denied" in msg
 
@@ -207,9 +248,16 @@ class TestMain:
     })
     @patch("watchdog.notify_slack")
     @patch("watchdog.restart_container", return_value=(True, "ok"))
-    @patch("watchdog.check_heartbeat", return_value=True)
+    @patch("watchdog.request_manager_restart", return_value=(False, "no-docker"))
+    @patch("watchdog.heartbeat_is_stale", return_value=(True, 21.0))
+    @patch("watchdog.read_heartbeat", return_value={"updated_at": "2020-01-01T00:00:00+00:00"})
     def test_no_webhook_skips_slack(
-        self, mock_check: MagicMock, mock_restart: MagicMock, mock_notify: MagicMock,
+        self,
+        mock_read: MagicMock,
+        mock_is_stale: MagicMock,
+        mock_request_restart: MagicMock,
+        mock_restart: MagicMock,
+        mock_notify: MagicMock,
     ):
         watchdog.main()
         mock_restart.assert_called_once()

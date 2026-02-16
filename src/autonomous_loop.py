@@ -78,7 +78,38 @@ class AutonomousLoop:
         return self.manager.task_queue.next_pending()
 
     def _propose_tasks(self) -> list[TaskEntry]:
-        """LLMに新しいタスクの提案を依頼する."""
+        """LLMに新しいタスクの提案を依頼する.
+
+        まず InitiativePlanner による計画を試み、失敗または空の場合は
+        既存のLLMベースのタスク提案にフォールバックする。
+        """
+        # --- Initiative-based planning (preferred) ---
+        initiative_planner = getattr(self.manager, "initiative_planner", None)
+        if initiative_planner is not None:
+            try:
+                initiatives = initiative_planner.plan()
+                if initiatives:
+                    tasks: list[TaskEntry] = []
+                    for ini in initiatives:
+                        for tid in ini.task_ids:
+                            task = self.manager.task_queue._get_latest(tid)
+                            if task:
+                                tasks.append(task)
+                    if tasks:
+                        logger.info(
+                            "Initiative planner proposed %d tasks from %d initiatives",
+                            len(tasks),
+                            len(initiatives),
+                        )
+                        return tasks
+                    logger.info("Initiative planner returned initiatives but no tasks found in queue")
+            except Exception:
+                logger.warning(
+                    "Initiative planner failed, falling back to LLM proposal",
+                    exc_info=True,
+                )
+
+        # --- Fallback: LLM-based task proposal ---
         if self.manager.llm_client is None:
             logger.warning("LLM client not configured, cannot propose tasks")
             return []
@@ -187,7 +218,7 @@ class AutonomousLoop:
             logger.warning("Failed to record LLM call", exc_info=True)
 
         # Parse response to extract task descriptions
-        tasks: list[TaskEntry] = []
+        tasks = []
         for line in result.content.splitlines():
             line = line.strip()
             # Match lines starting with "- " or "* " or numbered "1. "
@@ -363,6 +394,7 @@ class AutonomousLoop:
                             quality_notes=q_notes,
                         )
                         self._report(f"タスク完了: {task.description}\n結果: {done_result}")
+                        self._check_initiative_completion(task.task_id)
                     return
 
                 if not needs_followup:
@@ -371,6 +403,7 @@ class AutonomousLoop:
                         task.task_id, "completed", result=result.content
                     )
                     self._report(f"タスク完了: {task.description}")
+                    self._check_initiative_completion(task.task_id)
                     return
 
             # Max turns reached
@@ -480,3 +513,60 @@ class AutonomousLoop:
             self.manager._slack_send(message)
         except Exception:
             logger.warning("Failed to send report: %s", message, exc_info=True)
+    def _check_initiative_completion(self, task_id: str) -> None:
+        """タスク完了時にイニシアチブの全タスク完了を検知し、振り返りを生成する."""
+        initiative_store = getattr(self.manager, "initiative_store", None)
+        initiative_planner = getattr(self.manager, "initiative_planner", None)
+        if initiative_store is None:
+            return
+
+        try:
+            # Check all active initiatives (planned or in_progress)
+            for status in ("planned", "in_progress"):
+                for initiative in initiative_store.list_by_status(status):
+                    if task_id not in initiative.task_ids:
+                        continue
+
+                    # Check if ALL tasks in this initiative are completed
+                    all_completed = True
+                    for tid in initiative.task_ids:
+                        task_entry = self.manager.task_queue._get_latest(tid)
+                        if task_entry is None or task_entry.status != "completed":
+                            all_completed = False
+                            break
+
+                    if not all_completed:
+                        continue
+
+                    # All tasks completed — mark initiative as completed
+                    initiative_store.update_status(initiative.initiative_id, "completed")
+                    logger.info(
+                        "Initiative completed: %s (%s)",
+                        initiative.title,
+                        initiative.initiative_id,
+                    )
+
+                    # Generate retrospective
+                    if initiative_planner is not None:
+                        try:
+                            retro = initiative_planner.generate_retrospective(
+                                initiative.initiative_id,
+                            )
+                            if retro:
+                                self._report(
+                                    f"🎉 イニシアチブ完了: {initiative.title}\n振り返り: {retro}"
+                                )
+                            else:
+                                self._report(f"🎉 イニシアチブ完了: {initiative.title}")
+                        except Exception:
+                            logger.exception(
+                                "Failed to generate retrospective for %s",
+                                initiative.initiative_id,
+                            )
+                            self._report(f"🎉 イニシアチブ完了: {initiative.title}")
+                    else:
+                        self._report(f"🎉 イニシアチブ完了: {initiative.title}")
+        except Exception:
+            logger.exception("Error checking initiative completion for task %s", task_id)
+
+

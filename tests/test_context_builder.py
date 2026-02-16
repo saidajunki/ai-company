@@ -211,3 +211,121 @@ class TestResearchNotesSection:
         )
         assert "## リサーチノート" in prompt
         assert "リサーチノートなし" in prompt
+
+
+# --- Initiative & Strategy section tests (Req 5.1, 5.2, 5.3) ---
+
+from models import InitiativeEntry, StrategyDirection
+
+
+def _make_initiative(
+    title: str = "テストイニシアチブ",
+    description: str = "テスト説明",
+    status: str = "in_progress",
+    initiative_id: str = "ini-001",
+) -> InitiativeEntry:
+    return InitiativeEntry(
+        initiative_id=initiative_id,
+        title=title,
+        description=description,
+        status=status,
+        created_at=datetime(2025, 7, 1, 12, 0, 0),
+        updated_at=datetime(2025, 7, 1, 12, 0, 0),
+    )
+
+
+class TestInitiativeSection:
+    """Tests for the イニシアチブ section (Requirements 5.1, 5.3)."""
+
+    def test_no_initiatives_shows_placeholder(self):
+        """Req 5.3: アクティブなイニシアチブなし when None."""
+        prompt = _build_prompt(active_initiatives=None)
+        assert "## イニシアチブ" in prompt
+        assert "アクティブなイニシアチブなし" in prompt
+
+    def test_empty_list_shows_placeholder(self):
+        """Req 5.3: アクティブなイニシアチブなし when empty list."""
+        prompt = _build_prompt(active_initiatives=[])
+        assert "アクティブなイニシアチブなし" in prompt
+
+    def test_single_initiative_appears(self):
+        """Req 5.1: active initiative title and description are displayed."""
+        ini = _make_initiative(title="OSSツール公開", description="GitHub公開計画")
+        prompt = _build_prompt(active_initiatives=[ini])
+        assert "## イニシアチブ" in prompt
+        assert "OSSツール公開" in prompt
+        assert "GitHub公開計画" in prompt
+        assert "アクティブなイニシアチブなし" not in prompt
+
+    def test_multiple_initiatives_all_appear(self):
+        """Req 5.1: multiple initiatives are listed."""
+        initiatives = [
+            _make_initiative(title=f"施策{i}", initiative_id=f"ini-{i}")
+            for i in range(3)
+        ]
+        prompt = _build_prompt(active_initiatives=initiatives)
+        for i in range(3):
+            assert f"施策{i}" in prompt
+
+    def test_initiative_shows_status(self):
+        """Req 5.1: status is included in the output."""
+        ini = _make_initiative(status="planned")
+        prompt = _build_prompt(active_initiatives=[ini])
+        assert "[planned]" in prompt
+
+    def test_backward_compat_without_initiatives(self):
+        """Omitting active_initiatives still works."""
+        prompt = build_system_prompt(
+            constitution=None,
+            wip=[],
+            recent_decisions=[],
+            budget_spent=0.0,
+            budget_limit=10.0,
+        )
+        assert "## イニシアチブ" in prompt
+        assert "アクティブなイニシアチブなし" in prompt
+
+
+class TestStrategySection:
+    """Tests for the 戦略方針 section (Requirement 5.2)."""
+
+    def test_no_strategy_shows_placeholder(self):
+        prompt = _build_prompt(strategy_direction=None)
+        assert "## 戦略方針" in prompt
+        assert "戦略方針未設定" in prompt
+
+    def test_empty_summary_shows_placeholder(self):
+        sd = StrategyDirection(summary="")
+        prompt = _build_prompt(strategy_direction=sd)
+        assert "戦略方針未設定" in prompt
+
+    def test_strategy_summary_appears(self):
+        """Req 5.2: strategy summary is included in the prompt."""
+        sd = StrategyDirection(summary="面白さ重視で小さく試す方針を継続")
+        prompt = _build_prompt(strategy_direction=sd)
+        assert "## 戦略方針" in prompt
+        assert "面白さ重視で小さく試す方針を継続" in prompt
+        assert "戦略方針未設定" not in prompt
+
+    def test_backward_compat_without_strategy(self):
+        """Omitting strategy_direction still works."""
+        prompt = build_system_prompt(
+            constitution=None,
+            wip=[],
+            recent_decisions=[],
+            budget_spent=0.0,
+            budget_limit=10.0,
+        )
+        assert "## 戦略方針" in prompt
+        assert "戦略方針未設定" in prompt
+
+    def test_section_order(self):
+        """Initiative and strategy sections appear after budget."""
+        ini = _make_initiative()
+        sd = StrategyDirection(summary="テスト方針")
+        prompt = _build_prompt(active_initiatives=[ini], strategy_direction=sd)
+        budget_pos = prompt.index("## 予算状況")
+        initiative_pos = prompt.index("## イニシアチブ")
+        strategy_pos = prompt.index("## 戦略方針")
+        research_pos = prompt.index("## リサーチノート")
+        assert budget_pos < initiative_pos < strategy_pos < research_pos

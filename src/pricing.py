@@ -13,7 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import httpx
+
 from models import ModelPricing, PricingCache
+
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +52,87 @@ def load_pricing_cache(path: Path) -> Optional[PricingCache]:
     except (json.JSONDecodeError, ValueError):
         return None
 
+
+# ---------------------------------------------------------------------------
+# Fetch (startup / unknown-model refresh)
+# ---------------------------------------------------------------------------
+
+def fetch_openrouter_pricing_cache(
+    *,
+    api_key: str | None = None,
+    timeout_s: float = 20.0,
+) -> PricingCache:
+    """Fetch a fresh pricing snapshot from OpenRouter models API."""
+    headers = {
+        "User-Agent": "ai-company/0.1",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    resp = httpx.get(OPENROUTER_MODELS_URL, headers=headers, timeout=timeout_s)
+    resp.raise_for_status()
+    payload = resp.json()
+
+    now = datetime.now(timezone.utc)
+    models: dict[str, ModelPricing] = {}
+
+    for item in payload.get("data", []) if isinstance(payload, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("id")
+        pricing = item.get("pricing") or {}
+        if not model_id or not isinstance(pricing, dict):
+            continue
+
+        prompt = pricing.get("prompt")
+        completion = pricing.get("completion")
+        if prompt is None or completion is None:
+            continue
+
+        try:
+            prompt_per_token = float(prompt)
+            completion_per_token = float(completion)
+        except (TypeError, ValueError):
+            continue
+
+        models[str(model_id)] = ModelPricing(
+            input_price_per_1k=prompt_per_token * 1000.0,
+            output_price_per_1k=completion_per_token * 1000.0,
+            retrieved_at=now,
+        )
+
+    return PricingCache(
+        retrieved_at=now,
+        models=models,
+    )
+
+
+def refresh_openrouter_pricing_cache(
+    path: Path,
+    *,
+    api_key: str | None = None,
+    max_age_hours: float = 24.0,
+    force: bool = False,
+) -> Optional[PricingCache]:
+    """Refresh pricing cache if missing or stale.
+
+    Returns the newest available cache (freshly fetched or existing), or None.
+    """
+    now = datetime.now(timezone.utc)
+    existing = load_pricing_cache(path)
+
+    if not force and existing is not None:
+        age_hours = (now - existing.retrieved_at).total_seconds() / 3600.0
+        if age_hours <= max_age_hours:
+            return existing
+
+    try:
+        fresh = fetch_openrouter_pricing_cache(api_key=api_key)
+        save_pricing_cache(path, fresh)
+        return fresh
+    except Exception:
+        # Network/API failure → keep existing if available
+        return existing
 
 # ---------------------------------------------------------------------------
 # Model lookup

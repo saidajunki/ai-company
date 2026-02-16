@@ -43,6 +43,7 @@ from pricing import (
     get_pricing_with_fallback,
     load_pricing_cache,
     pricing_cache_path,
+    refresh_openrouter_pricing_cache,
 )
 from recovery import determine_recovery_action, RecoveryAction
 from report_formatter import CostSummary, ReportData, format_report
@@ -53,6 +54,10 @@ from service_registry import ServiceRegistry
 from shell_executor import ShellResult, execute_shell
 from sub_agent_runner import SubAgentRunner
 from git_publisher import GitPublisher
+from initiative_store import InitiativeStore
+from initiative_planner import InitiativePlanner
+from recovery_planner import RecoveryPlanner
+from strategy_analyzer import StrategyAnalyzer
 from web_searcher import WebSearcher
 from task_queue import TaskQueue
 from vision_loader import VisionLoader
@@ -145,6 +150,8 @@ class Manager:
         # Load pricing cache
         cache_path = pricing_cache_path(base_dir, company_id)
         self.pricing_cache = load_pricing_cache(cache_path)
+        self._pricing_refresh_attempted_models: set[str] = set()
+        self._pricing_api_key: str | None = None
 
         # Set externally after construction
         self.llm_client: LLMClient | None = None
@@ -165,6 +172,12 @@ class Manager:
         self.web_searcher = WebSearcher()
         self.research_note_store = ResearchNoteStore(base_dir, company_id)
         self.git_publisher = GitPublisher(work_dir=self.base_dir / "companies" / self.company_id)
+
+        # Initiative components
+        self.initiative_store = InitiativeStore(base_dir, company_id)
+        self.strategy_analyzer = StrategyAnalyzer(self.creator_review_store, self.initiative_store)
+        self.initiative_planner = InitiativePlanner(self, self.initiative_store, self.strategy_analyzer)
+        self.recovery_planner = RecoveryPlanner(self, self.initiative_planner)
 
     # ------------------------------------------------------------------
     # Startup (Req 7.1, 7.6)
@@ -199,6 +212,15 @@ class Manager:
 
         # Determine what to do first after wakeup
         action, description = determine_recovery_action(self.state)
+
+        # If consult_creator, try autonomous recovery first
+        if action == "consult_creator":
+            try:
+                idle_result = self.recovery_planner.handle_idle()
+                return action, idle_result
+            except Exception:
+                logger.warning("RecoveryPlanner failed, falling back to consult_creator", exc_info=True)
+
         return action, description
 
     # ------------------------------------------------------------------
@@ -217,6 +239,18 @@ class Manager:
             limit_usd=limit,
             window_minutes=DEFAULT_WINDOW_MINUTES,
         )
+
+    def refresh_pricing_cache(self, *, api_key: str | None = None, force: bool = False) -> None:
+        """Refresh OpenRouter pricing cache (best-effort)."""
+        self._pricing_api_key = api_key or self._pricing_api_key
+        path = pricing_cache_path(self.base_dir, self.company_id)
+        refreshed = refresh_openrouter_pricing_cache(
+            path,
+            api_key=self._pricing_api_key,
+            force=force,
+        )
+        if refreshed is not None:
+            self.pricing_cache = refreshed
 
     # ------------------------------------------------------------------
     # LLM call recording (Req 5.1, 5.2, 9.3)
@@ -239,7 +273,22 @@ class Manager:
         Returns:
             The persisted ``LedgerEvent``.
         """
+        previous_cache = self.pricing_cache
         pricing, source = get_pricing_with_fallback(self.pricing_cache, model)
+
+        # Unknown model → refresh pricing cache (optional, best-effort)
+        auto_refresh = os.environ.get("OPENROUTER_PRICING_AUTO_REFRESH", "0") == "1"
+        if auto_refresh and source == "fallback_default" and model not in self._pricing_refresh_attempted_models:
+            self._pricing_refresh_attempted_models.add(model)
+            try:
+                self.refresh_pricing_cache(force=True)
+                pricing, source = get_pricing_with_fallback(
+                    self.pricing_cache,
+                    model,
+                    previous_cache=previous_cache,
+                )
+            except Exception:
+                logger.warning("Failed to refresh pricing cache for model=%s", model, exc_info=True)
 
         input_cost = (input_tokens / 1000) * pricing.input_price_per_1k
         output_cost = (output_tokens / 1000) * pricing.output_price_per_1k
@@ -289,6 +338,7 @@ class Manager:
         cost_summary = CostSummary(
             spent_usd=spent,
             remaining_usd=remaining,
+            limit_usd=limit,
         )
 
         # Autonomous growth data (Req 7.1, 7.2, 7.3)
@@ -387,13 +437,65 @@ class Manager:
         else:
             next_plan = "新規タスクの提案を検討"
 
+        # --- Blockers: pending Creator consultations ---
+        blockers: list[str] = []
+        try:
+            pending_consults = self.consultation_store.list_by_status("pending")
+            pending_consults.sort(key=lambda c: c.created_at)
+            for c in pending_consults[:5]:
+                first_line = (c.content or "").strip().splitlines()[0] if c.content else ""
+                if len(first_line) > 120:
+                    first_line = first_line[:120] + "…"
+                blockers.append(f"[consult_id: {c.consultation_id}] {first_line}")
+        except Exception:
+            logger.warning("Failed to load consultations for report blockers", exc_info=True)
+
+        # --- Approvals: pending constitution amendment proposals ---
+        approvals: list[str] = []
+        try:
+            processed: set[str] = {
+                e.request_id
+                for e in self.state.decision_log
+                if e.request_id and e.status in ("approved", "rejected")
+            }
+            for entry in self.state.decision_log:
+                if (
+                    entry.status == "proposed"
+                    and entry.request_id
+                    and entry.request_id not in processed
+                ):
+                    decision = (entry.decision or "").strip()
+                    if len(decision) > 120:
+                        decision = decision[:120] + "…"
+                    approvals.append(f"[request_id: {entry.request_id}] {decision}")
+            approvals = approvals[:5]
+        except Exception:
+            logger.warning("Failed to load approvals for report", exc_info=True)
+
+        # --- Cost allocation plan (lightweight, derived from current state) ---
+        alloc_parts: list[str] = []
+        if approvals:
+            alloc_parts.append(f"承認待ち{len(approvals)}件")
+        if blockers:
+            alloc_parts.append(f"相談待ち{len(blockers)}件")
+        if next_plan:
+            alloc_next = next_plan
+            if len(alloc_next) > 120:
+                alloc_next = alloc_next[:120] + "…"
+            alloc_parts.append(f"次: {alloc_next}")
+        if remaining <= 0.0:
+            alloc_parts.append("残予算0のためLLM/APIは最小化")
+        cost_summary.allocation_plan = " / ".join(alloc_parts) if alloc_parts else ""
+
         data = ReportData(
             timestamp=now,
             company_id=self.company_id,
             wip=list(self.state.wip),
             delta_description=delta_description,
             next_plan=next_plan,
+            blockers=blockers,
             cost=cost_summary,
+            approvals=approvals,
             running_tasks=running_tasks,
             active_agents=active_agents,
             recent_services=recent_services,
@@ -720,6 +822,8 @@ class Manager:
                 creator_reviews=creator_reviews,
                 research_notes=research_notes,
                 task_history=task_history,
+                active_initiatives=self._load_active_initiatives(),
+                strategy_direction=self._load_strategy_direction(),
             )
 
             conversation: list[dict[str, str]] = [
@@ -771,6 +875,24 @@ class Manager:
         except Exception:
             logger.exception("Unexpected error in process_message")
             self._slack_send("エラー: メッセージ処理中に予期しないエラーが発生しました")
+
+    def _load_active_initiatives(self) -> list | None:
+        """Load active initiatives (in_progress + planned) for context builder."""
+        try:
+            active = self.initiative_store.list_by_status("in_progress")
+            planned = self.initiative_store.list_by_status("planned")
+            return active + planned
+        except Exception:
+            logger.warning("Failed to load active initiatives", exc_info=True)
+            return None
+
+    def _load_strategy_direction(self):
+        """Load strategy direction for context builder."""
+        try:
+            return self.strategy_analyzer.analyze()
+        except Exception:
+            logger.warning("Failed to load strategy direction", exc_info=True)
+            return None
 
     def _execute_action_loop(
         self,

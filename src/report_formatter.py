@@ -16,6 +16,7 @@ class CostSummary:
 
     spent_usd: float
     remaining_usd: float
+    limit_usd: float = 10.0
     allocation_plan: str = ""
 
 
@@ -30,7 +31,7 @@ class ReportData:
     artifact_links: str = ""
     next_plan: str = ""
     blockers: list[str] = field(default_factory=list)
-    cost: CostSummary = field(default_factory=lambda: CostSummary(0.0, 10.0))
+    cost: CostSummary = field(default_factory=lambda: CostSummary(0.0, 10.0, 10.0))
     approvals: list[str] = field(default_factory=list)
     running_tasks: list[str] = field(default_factory=list)
     active_agents: list[str] = field(default_factory=list)
@@ -87,7 +88,7 @@ def format_report(data: ReportData) -> str:
 {blocker_lines}
 
 ### Cost(60m)
-- 消費: ${data.cost.spent_usd:.2f} / $10.00
+- 消費: ${data.cost.spent_usd:.2f} / ${data.cost.limit_usd:.2f}
 - 残り: ${data.cost.remaining_usd:.2f}
 - 配分予定: {data.cost.allocation_plan}
 

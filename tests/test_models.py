@@ -624,3 +624,173 @@ class TestResearchNote:
         restored = ResearchNote.model_validate_json(n.model_dump_json())
         assert restored == n
         assert restored.published_at is None
+
+# --- Initiative Models (Req 3.1) ---
+
+from models import InitiativeScores, InitiativeEntry, StrategyDirection
+
+
+class TestInitiativeScores:
+    def test_valid_scores(self):
+        s = InitiativeScores(
+            interestingness=20, cost_efficiency=15, realism=10, evolvability=25,
+        )
+        assert s.interestingness == 20
+        assert s.cost_efficiency == 15
+        assert s.realism == 10
+        assert s.evolvability == 25
+
+    def test_total_property(self):
+        s = InitiativeScores(
+            interestingness=20, cost_efficiency=15, realism=10, evolvability=25,
+        )
+        assert s.total == 70
+
+    def test_total_all_zero(self):
+        s = InitiativeScores(
+            interestingness=0, cost_efficiency=0, realism=0, evolvability=0,
+        )
+        assert s.total == 0
+
+    def test_total_all_max(self):
+        s = InitiativeScores(
+            interestingness=25, cost_efficiency=25, realism=25, evolvability=25,
+        )
+        assert s.total == 100
+
+    def test_score_below_zero_rejected(self):
+        with pytest.raises(ValidationError):
+            InitiativeScores(
+                interestingness=-1, cost_efficiency=0, realism=0, evolvability=0,
+            )
+
+    def test_score_above_25_rejected(self):
+        with pytest.raises(ValidationError):
+            InitiativeScores(
+                interestingness=26, cost_efficiency=0, realism=0, evolvability=0,
+            )
+
+    def test_json_round_trip(self):
+        s = InitiativeScores(
+            interestingness=10, cost_efficiency=20, realism=5, evolvability=15,
+        )
+        restored = InitiativeScores.model_validate_json(s.model_dump_json())
+        assert restored == s
+
+
+class TestInitiativeEntry:
+    def test_valid_entry(self):
+        e = InitiativeEntry(
+            initiative_id="init-001",
+            title="OSSツール公開",
+            description="開発ツールをOSSとして公開する",
+            status="planned",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        assert e.initiative_id == "init-001"
+        assert e.status == "planned"
+        assert e.task_ids == []
+        assert e.estimated_scores is None
+        assert e.actual_scores is None
+        assert e.retrospective is None
+        assert e.first_step is None
+
+    def test_all_statuses(self):
+        for status in ("planned", "in_progress", "completed", "abandoned", "consulting"):
+            e = InitiativeEntry(
+                initiative_id="init-001",
+                title="test",
+                description="test",
+                status=status,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+            assert e.status == status
+
+    def test_invalid_status(self):
+        with pytest.raises(ValidationError):
+            InitiativeEntry(
+                initiative_id="init-001",
+                title="test",
+                description="test",
+                status="invalid",
+                created_at=NOW,
+                updated_at=NOW,
+            )
+
+    def test_with_scores(self):
+        scores = InitiativeScores(
+            interestingness=20, cost_efficiency=15, realism=10, evolvability=25,
+        )
+        e = InitiativeEntry(
+            initiative_id="init-002",
+            title="技術ブログ開始",
+            description="技術ブログを開始する",
+            status="in_progress",
+            task_ids=["task-1", "task-2"],
+            estimated_scores=scores,
+            first_step="ブログプラットフォームを選定する",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        assert e.estimated_scores is not None
+        assert e.estimated_scores.total == 70
+        assert e.task_ids == ["task-1", "task-2"]
+        assert e.first_step == "ブログプラットフォームを選定する"
+
+    def test_json_round_trip(self):
+        scores = InitiativeScores(
+            interestingness=10, cost_efficiency=20, realism=5, evolvability=15,
+        )
+        e = InitiativeEntry(
+            initiative_id="init-003",
+            title="テスト施策",
+            description="テスト用の施策",
+            status="completed",
+            task_ids=["t1"],
+            estimated_scores=scores,
+            actual_scores=scores,
+            retrospective="学びが多かった",
+            first_step="最初のタスク",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        restored = InitiativeEntry.model_validate_json(e.model_dump_json())
+        assert restored == e
+
+
+class TestStrategyDirection:
+    def test_defaults(self):
+        sd = StrategyDirection()
+        assert sd.strengthen == []
+        assert sd.avoid == []
+        assert sd.pivot_suggestions == []
+        assert sd.weak_axes == []
+        assert sd.score_trends == {}
+        assert sd.summary == ""
+
+    def test_with_values(self):
+        sd = StrategyDirection(
+            strengthen=["面白さ重視"],
+            avoid=["高コスト施策"],
+            pivot_suggestions=["小さく試す"],
+            weak_axes=["コスト効率"],
+            score_trends={"interestingness": 20.0, "cost_efficiency": 8.5},
+            summary="面白さは高いがコスト効率に課題あり",
+        )
+        assert len(sd.strengthen) == 1
+        assert sd.score_trends["cost_efficiency"] == 8.5
+        assert "コスト効率" in sd.summary
+
+    def test_json_round_trip(self):
+        sd = StrategyDirection(
+            strengthen=["a"],
+            avoid=["b"],
+            pivot_suggestions=["c"],
+            weak_axes=["d"],
+            score_trends={"x": 1.5},
+            summary="テスト",
+        )
+        restored = StrategyDirection.model_validate_json(sd.model_dump_json())
+        assert restored == sd

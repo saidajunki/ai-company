@@ -711,3 +711,185 @@ class TestResearchActionIntegration:
 
         # LLM was still re-queried
         assert mgr.llm_client.chat.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Recovery planner integration in startup (Task 6.4)
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch
+
+
+class TestStartupRecoveryPlanner:
+    """Tests for Manager.startup() calling RecoveryPlanner on consult_creator."""
+
+    def test_startup_consult_creator_calls_recovery_planner(self, tmp_path: Path):
+        """When startup action is consult_creator, recovery_planner.handle_idle() is called."""
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        mgr.recovery_planner = MagicMock()
+        mgr.recovery_planner.handle_idle.return_value = "自律的にイニシアチブを計画しました"
+
+        action, desc = mgr.startup()
+
+        assert action == "consult_creator"
+        assert desc == "自律的にイニシアチブを計画しました"
+        mgr.recovery_planner.handle_idle.assert_called_once()
+
+    def test_startup_recovery_planner_exception_falls_back(self, tmp_path: Path):
+        """If recovery_planner.handle_idle() raises, startup falls back to original description."""
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        mgr.recovery_planner = MagicMock()
+        mgr.recovery_planner.handle_idle.side_effect = RuntimeError("boom")
+
+        action, desc = mgr.startup()
+
+        assert action == "consult_creator"
+        # Falls back to the original recovery description (not the exception)
+        assert "boom" not in desc
+
+    def test_startup_resume_wip_does_not_call_recovery_planner(self, tmp_path: Path):
+        """When action is resume_wip, recovery_planner should NOT be called."""
+        init_company_directory(tmp_path, CID)
+
+        hb = HeartbeatState(
+            updated_at=_ts(),
+            manager_pid=999,
+            status="running",
+            current_wip=["task-A"],
+        )
+        save_heartbeat(tmp_path, CID, hb)
+
+        mgr = Manager(tmp_path, CID)
+        mgr.recovery_planner = MagicMock()
+
+        action, desc = mgr.startup()
+
+        assert action == "resume_wip"
+        mgr.recovery_planner.handle_idle.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Initiative info in process_message (Task 6.4)
+# ---------------------------------------------------------------------------
+
+
+class TestProcessMessageInitiativeContext:
+    """Tests for initiative info being passed to build_system_prompt in process_message."""
+
+    def test_initiative_info_passed_to_system_prompt(self, tmp_path: Path):
+        """process_message should include active initiatives and strategy in system prompt."""
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = LLMResponse(
+            content="<reply>了解</reply>",
+            input_tokens=100,
+            output_tokens=50,
+            model="test-model",
+            finish_reason="stop",
+        )
+        mgr.llm_client = mock_llm
+        mgr.slack = MagicMock()
+
+        mgr.process_message("テスト", user_id="U123")
+
+        # Verify system prompt contains initiative section
+        call_args = mock_llm.chat.call_args[0][0]
+        system_prompt = call_args[0]["content"]
+        # With no active initiatives, should show the empty message
+        assert "アクティブなイニシアチブなし" in system_prompt
+
+    def test_initiative_info_includes_active_initiatives(self, tmp_path: Path):
+        """When initiatives exist, they should appear in the system prompt."""
+        from models import InitiativeEntry
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = LLMResponse(
+            content="<reply>了解</reply>",
+            input_tokens=100,
+            output_tokens=50,
+            model="test-model",
+            finish_reason="stop",
+        )
+        mgr.llm_client = mock_llm
+        mgr.slack = MagicMock()
+
+        # Save an in_progress initiative
+        now = datetime.now(timezone.utc)
+        entry = InitiativeEntry(
+            initiative_id="init-001",
+            title="テストイニシアチブ",
+            description="テスト用の施策",
+            status="in_progress",
+            created_at=now,
+            updated_at=now,
+        )
+        mgr.initiative_store.save(entry)
+
+        mgr.process_message("テスト", user_id="U123")
+
+        call_args = mock_llm.chat.call_args[0][0]
+        system_prompt = call_args[0]["content"]
+        assert "テストイニシアチブ" in system_prompt
+
+    def test_strategy_direction_in_system_prompt(self, tmp_path: Path):
+        """Strategy direction should appear in the system prompt."""
+        from models import CreatorReview
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = LLMResponse(
+            content="<reply>了解</reply>",
+            input_tokens=100,
+            output_tokens=50,
+            model="test-model",
+            finish_reason="stop",
+        )
+        mgr.llm_client = mock_llm
+        mgr.slack = MagicMock()
+
+        # Save a creator review so strategy analyzer has data
+        now = datetime.now(timezone.utc)
+        review = CreatorReview(
+            timestamp=now,
+            user_id="U123",
+            score_total_100=80,
+            score_interestingness_25=22,
+            score_cost_efficiency_25=18,
+            score_realism_25=20,
+            score_evolvability_25=20,
+        )
+        mgr.creator_review_store.save(review)
+
+        mgr.process_message("テスト", user_id="U123")
+
+        call_args = mock_llm.chat.call_args[0][0]
+        system_prompt = call_args[0]["content"]
+        # Strategy section should be present (not "戦略方針未設定")
+        assert "戦略方針" in system_prompt
+
+    def test_initiative_load_failure_does_not_break_processing(self, tmp_path: Path):
+        """If loading initiatives fails, process_message should still work."""
+        init_company_directory(tmp_path, CID)
+        mgr = Manager(tmp_path, CID)
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = LLMResponse(
+            content="<reply>了解</reply>",
+            input_tokens=100,
+            output_tokens=50,
+            model="test-model",
+            finish_reason="stop",
+        )
+        mgr.llm_client = mock_llm
+        mgr.slack = MagicMock()
+
+        # Break the initiative store
+        mgr.initiative_store = MagicMock()
+        mgr.initiative_store.list_by_status.side_effect = OSError("disk error")
+
+        # Should not raise
+        mgr.process_message("テスト", user_id="U123")
+        assert mock_llm.chat.call_count == 1

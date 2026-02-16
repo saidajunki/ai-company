@@ -10,7 +10,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from models import ConstitutionModel, ConversationEntry, CreatorReview, DecisionLogEntry, ResearchNote, TaskEntry
+from models import (
+    ConstitutionModel,
+    ConversationEntry,
+    CreatorReview,
+    DecisionLogEntry,
+    InitiativeEntry,
+    ResearchNote,
+    StrategyDirection,
+    TaskEntry,
+)
 
 
 _RESULT_TRUNCATE_LEN = 200
@@ -36,6 +45,8 @@ def build_system_prompt(
     creator_reviews: list[CreatorReview] | None = None,
     research_notes: list[ResearchNote] | None = None,
     task_history: TaskHistoryContext | None = None,
+    active_initiatives: list[InitiativeEntry] | None = None,
+    strategy_direction: StrategyDirection | None = None,
 ) -> str:
     """コンテキスト情報からシステムプロンプトを構築する."""
     sections: list[str] = [
@@ -59,6 +70,12 @@ def build_system_prompt(
 
     # --- 予算状況 ---
     sections.append(_build_budget_section(budget_spent, budget_limit))
+
+    # --- イニシアチブ ---
+    sections.append(_build_initiative_section(active_initiatives))
+
+    # --- 戦略方針 ---
+    sections.append(_build_strategy_section(strategy_direction))
 
     # --- リサーチノート ---
     sections.append(_build_research_section(research_notes))
@@ -127,6 +144,29 @@ def _build_budget_section(budget_spent: float, budget_limit: float) -> str:
         "## 予算状況",
         f"- 消費: ${budget_spent:.2f} / ${budget_limit:.2f}（残り: ${remaining:.2f}）",
     ])
+
+
+def _build_initiative_section(
+    active_initiatives: list[InitiativeEntry] | None,
+) -> str:
+    lines = ["## イニシアチブ"]
+    if not active_initiatives:
+        lines.append("アクティブなイニシアチブなし")
+    else:
+        for ini in active_initiatives:
+            lines.append(f"- [{ini.status}] {ini.title}: {ini.description}")
+    return "\n".join(lines)
+
+
+def _build_strategy_section(
+    strategy_direction: StrategyDirection | None,
+) -> str:
+    lines = ["## 戦略方針"]
+    if strategy_direction is None or not strategy_direction.summary:
+        lines.append("戦略方針未設定")
+    else:
+        lines.append(strategy_direction.summary)
+    return "\n".join(lines)
 
 
 def _build_format_section() -> str:

@@ -175,6 +175,7 @@ class TestTickExecutesPending:
 class TestProposeTasks:
     def test_propose_tasks_when_no_pending(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
+        mgr.initiative_planner = None
         mgr.llm_client.chat.return_value = LLMResponse(
             content="- OSS調査を行う\n- プロトタイプを作成する\n",
             input_tokens=100,
@@ -192,6 +193,7 @@ class TestProposeTasks:
 
     def test_propose_tasks_returns_empty_on_llm_error(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
+        mgr.initiative_planner = None
         mgr.llm_client.chat.return_value = LLMError(
             error_type="api_error",
             message="fail",
@@ -203,6 +205,7 @@ class TestProposeTasks:
 
     def test_propose_tasks_returns_empty_without_llm(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
+        mgr.initiative_planner = None
         mgr.llm_client = None
         loop = AutonomousLoop(mgr)
 
@@ -212,6 +215,8 @@ class TestProposeTasks:
     def test_tick_proposes_when_no_pending(self, tmp_path: Path):
         """tick() should propose tasks and then execute one when queue is empty."""
         mgr = _make_manager(tmp_path)
+        # Disable initiative planner so the LLM fallback path is tested
+        mgr.initiative_planner = None
         call_count = 0
 
         def mock_chat(messages):
@@ -335,4 +340,158 @@ class TestWipLimitFromConstitution:
         # Should skip because WIP limit is 1 and 1 task is running
         pending = mgr.task_queue.list_by_status("pending")
         assert len(pending) == 1
+        assert mgr.llm_client.chat.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# _propose_tasks — InitiativePlanner integration (Task 6.3)
+# ---------------------------------------------------------------------------
+
+class TestProposeTasksWithInitiativePlanner:
+    """Tests for _propose_tasks() calling InitiativePlanner first."""
+
+    def test_uses_initiative_planner_when_available(self, tmp_path: Path):
+        """When initiative_planner is set and returns initiatives with tasks,
+        _propose_tasks() should return those tasks without calling LLM."""
+        mgr = _make_manager(tmp_path)
+        loop = AutonomousLoop(mgr)
+
+        # Pre-add a task to the queue so we can reference its ID
+        task_entry = mgr.task_queue.add("イニシアチブの最初の一手")
+
+        # Create a mock initiative planner
+        now = datetime.now(timezone.utc)
+        mock_initiative = MagicMock()
+        mock_initiative.task_ids = [task_entry.task_id]
+
+        mock_planner = MagicMock()
+        mock_planner.plan.return_value = [mock_initiative]
+        mgr.initiative_planner = mock_planner
+
+        tasks = loop._propose_tasks()
+
+        assert len(tasks) == 1
+        assert tasks[0].task_id == task_entry.task_id
+        mock_planner.plan.assert_called_once()
+        # LLM should NOT have been called
+        assert mgr.llm_client.chat.call_count == 0
+
+    def test_falls_back_to_llm_when_planner_returns_empty(self, tmp_path: Path):
+        """When initiative_planner.plan() returns empty list,
+        should fall back to LLM-based proposal."""
+        mgr = _make_manager(tmp_path)
+        mgr.llm_client.chat.return_value = LLMResponse(
+            content="- LLMフォールバックタスク\n",
+            input_tokens=100,
+            output_tokens=50,
+            model="test-model",
+            finish_reason="stop",
+        )
+        loop = AutonomousLoop(mgr)
+
+        mock_planner = MagicMock()
+        mock_planner.plan.return_value = []
+        mgr.initiative_planner = mock_planner
+
+        tasks = loop._propose_tasks()
+
+        assert len(tasks) == 1
+        assert tasks[0].description == "LLMフォールバックタスク"
+        mock_planner.plan.assert_called_once()
+        assert mgr.llm_client.chat.call_count == 1
+
+    def test_falls_back_to_llm_when_planner_raises(self, tmp_path: Path):
+        """When initiative_planner.plan() raises an exception,
+        should fall back to LLM-based proposal."""
+        mgr = _make_manager(tmp_path)
+        mgr.llm_client.chat.return_value = LLMResponse(
+            content="- 例外後フォールバック\n",
+            input_tokens=100,
+            output_tokens=50,
+            model="test-model",
+            finish_reason="stop",
+        )
+        loop = AutonomousLoop(mgr)
+
+        mock_planner = MagicMock()
+        mock_planner.plan.side_effect = RuntimeError("planner broke")
+        mgr.initiative_planner = mock_planner
+
+        tasks = loop._propose_tasks()
+
+        assert len(tasks) == 1
+        assert tasks[0].description == "例外後フォールバック"
+
+    def test_falls_back_when_no_initiative_planner_attr(self, tmp_path: Path):
+        """When manager has no initiative_planner attribute,
+        should use LLM-based proposal as before."""
+        mgr = _make_manager(tmp_path)
+        mgr.llm_client.chat.return_value = LLMResponse(
+            content="- 通常のLLMタスク\n",
+            input_tokens=100,
+            output_tokens=50,
+            model="test-model",
+            finish_reason="stop",
+        )
+        loop = AutonomousLoop(mgr)
+
+        # Ensure no initiative_planner attribute
+        if hasattr(mgr, "initiative_planner"):
+            delattr(mgr, "initiative_planner")
+
+        tasks = loop._propose_tasks()
+
+        assert len(tasks) == 1
+        assert tasks[0].description == "通常のLLMタスク"
+
+    def test_falls_back_when_tasks_not_in_queue(self, tmp_path: Path):
+        """When initiative_planner returns initiatives but task_ids
+        don't match any tasks in queue, should fall back to LLM."""
+        mgr = _make_manager(tmp_path)
+        mgr.llm_client.chat.return_value = LLMResponse(
+            content="- キュー不一致フォールバック\n",
+            input_tokens=100,
+            output_tokens=50,
+            model="test-model",
+            finish_reason="stop",
+        )
+        loop = AutonomousLoop(mgr)
+
+        mock_initiative = MagicMock()
+        mock_initiative.task_ids = ["nonexistent-id"]
+
+        mock_planner = MagicMock()
+        mock_planner.plan.return_value = [mock_initiative]
+        mgr.initiative_planner = mock_planner
+
+        tasks = loop._propose_tasks()
+
+        # Should fall back to LLM
+        assert len(tasks) == 1
+        assert tasks[0].description == "キュー不一致フォールバック"
+
+    def test_multiple_initiatives_multiple_tasks(self, tmp_path: Path):
+        """When initiative_planner returns multiple initiatives with tasks,
+        all tasks should be collected."""
+        mgr = _make_manager(tmp_path)
+        loop = AutonomousLoop(mgr)
+
+        task1 = mgr.task_queue.add("タスク1")
+        task2 = mgr.task_queue.add("タスク2")
+
+        ini1 = MagicMock()
+        ini1.task_ids = [task1.task_id]
+        ini2 = MagicMock()
+        ini2.task_ids = [task2.task_id]
+
+        mock_planner = MagicMock()
+        mock_planner.plan.return_value = [ini1, ini2]
+        mgr.initiative_planner = mock_planner
+
+        tasks = loop._propose_tasks()
+
+        assert len(tasks) == 2
+        task_ids = {t.task_id for t in tasks}
+        assert task1.task_id in task_ids
+        assert task2.task_id in task_ids
         assert mgr.llm_client.chat.call_count == 0

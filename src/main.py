@@ -78,6 +78,13 @@ def main() -> None:
     else:
         log.warning("OPENROUTER_API_KEY not set – LLM features disabled")
 
+    # Refresh OpenRouter pricing snapshot on startup (best-effort)
+    try:
+        mgr.refresh_pricing_cache(api_key=OPENROUTER_API_KEY)
+        log.info("Pricing cache refreshed (models=%s)", len(mgr.pricing_cache.models) if mgr.pricing_cache else "none")
+    except Exception:
+        log.exception("Failed to refresh pricing cache on startup")
+
     # --- Slack integration ---
     slack = None
     if SLACK_BOT_TOKEN and SLACK_APP_TOKEN:

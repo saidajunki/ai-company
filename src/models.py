@@ -78,7 +78,7 @@ class WorkPrinciples(BaseModel):
 
 class Amendment(BaseModel):
     proposer: str = "Manager（理由と影響を添える）"
-    approver: str = "Creator（Slackリアクション）"
+    approver: str = "Creator（Slack返信/リアクション）"
     process: str = "提案→承認→適用→Decision_Logに記録"
 
 
@@ -220,6 +220,18 @@ class TaskEntry(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     quality_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     quality_notes: Optional[str] = None
+    retry_count: int = Field(default=0, ge=0)
+    max_retries: int = Field(default=3, ge=0)
+    parent_task_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_retry_count(self) -> "TaskEntry":
+        """retry_count は max_retries 以下でなければならない."""
+        if self.retry_count > self.max_retries:
+            raise ValueError(
+                f"retry_count ({self.retry_count}) must be <= max_retries ({self.max_retries})"
+            )
+        return self
 
 
 # --- Agent Registry (Req 4.1) ---
@@ -292,3 +304,57 @@ class ConsultationEntry(BaseModel):
     resolved_at: Optional[datetime] = None
     resolution: Optional[str] = None
     related_task_id: Optional[str] = None
+
+
+# --- Initiative Models (Req 3.1) ---
+
+
+class InitiativeScores(BaseModel):
+    """イニシアチブのスコア予測/実績."""
+
+    interestingness: int = Field(ge=0, le=25)
+    cost_efficiency: int = Field(ge=0, le=25)
+    realism: int = Field(ge=0, le=25)
+    evolvability: int = Field(ge=0, le=25)
+
+    @property
+    def total(self) -> int:
+        return (
+            self.interestingness
+            + self.cost_efficiency
+            + self.realism
+            + self.evolvability
+        )
+
+
+class InitiativeEntry(BaseModel):
+    """ビジネスイニシアチブエントリ."""
+
+    initiative_id: str
+    title: str
+    description: str
+    status: Literal[
+        "planned",
+        "in_progress",
+        "completed",
+        "abandoned",
+        "consulting",
+    ]
+    task_ids: list[str] = Field(default_factory=list)
+    estimated_scores: Optional[InitiativeScores] = None
+    actual_scores: Optional[InitiativeScores] = None
+    retrospective: Optional[str] = None
+    first_step: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class StrategyDirection(BaseModel):
+    """戦略方針の分析結果."""
+
+    strengthen: list[str] = Field(default_factory=list)
+    avoid: list[str] = Field(default_factory=list)
+    pivot_suggestions: list[str] = Field(default_factory=list)
+    weak_axes: list[str] = Field(default_factory=list)
+    score_trends: dict[str, float] = Field(default_factory=dict)
+    summary: str = ""
