@@ -495,3 +495,219 @@ class TestProcessMessageConversationMemory:
         for entry in entries:
             assert entry.task_id is not None
             assert entry.task_id.startswith("msg-")
+
+
+# ---------------------------------------------------------------------------
+# Research action integration (Task 6.4)
+# ---------------------------------------------------------------------------
+
+from web_searcher import SearchResult
+
+
+def _make_manager_with_research_llm(tmp_path: Path, responses: list[LLMResponse]) -> Manager:
+    """Create a Manager with a mocked LLM that returns sequential responses."""
+    init_company_directory(tmp_path, CID)
+    mgr = Manager(tmp_path, CID)
+    mock_llm = MagicMock()
+    mock_llm.chat.side_effect = responses
+    mgr.llm_client = mock_llm
+    mgr.slack = MagicMock()
+    return mgr
+
+
+class TestResearchActionIntegration:
+    """Tests for research action handling in Manager._execute_action_loop()."""
+
+    def test_research_action_calls_web_searcher(self, tmp_path: Path):
+        """Research action triggers WebSearcher.search() with the query."""
+        mgr = _make_manager_with_research_llm(tmp_path, [
+            # Initial LLM response with research tag
+            LLMResponse(
+                content="<research>AI最新ニュース</research>",
+                input_tokens=100, output_tokens=50,
+                model="test-model", finish_reason="stop",
+            ),
+            # Follow-up after research results
+            LLMResponse(
+                content="<reply>調査完了</reply>",
+                input_tokens=200, output_tokens=80,
+                model="test-model", finish_reason="stop",
+            ),
+        ])
+        mgr.web_searcher = MagicMock()
+        mgr.web_searcher.search.return_value = [
+            SearchResult(title="AI News", url="https://example.com/ai", snippet="Latest AI news"),
+        ]
+
+        mgr.process_message("AIについて調べて", user_id="U123")
+
+        mgr.web_searcher.search.assert_called_once_with("AI最新ニュース")
+
+    def test_research_action_saves_notes(self, tmp_path: Path):
+        """Research results are saved as ResearchNotes via the store."""
+        mgr = _make_manager_with_research_llm(tmp_path, [
+            LLMResponse(
+                content="<research>Python trends</research>",
+                input_tokens=100, output_tokens=50,
+                model="test-model", finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<reply>結果をまとめました</reply>",
+                input_tokens=200, output_tokens=80,
+                model="test-model", finish_reason="stop",
+            ),
+        ])
+        mgr.web_searcher = MagicMock()
+        mgr.web_searcher.search.return_value = [
+            SearchResult(title="Python 2025", url="https://example.com/py", snippet="Python trends"),
+            SearchResult(title="FastAPI News", url="https://example.com/fa", snippet="FastAPI update"),
+        ]
+
+        mgr.process_message("Pythonのトレンドを調べて", user_id="U123")
+
+        notes = mgr.research_note_store.load_all()
+        assert len(notes) == 2
+        assert notes[0].query == "Python trends"
+        assert notes[0].source_url == "https://example.com/py"
+        assert notes[1].title == "FastAPI News"
+
+    def test_research_action_requeires_llm(self, tmp_path: Path):
+        """After research, LLM is re-queried with the results summary."""
+        mgr = _make_manager_with_research_llm(tmp_path, [
+            LLMResponse(
+                content="<research>test query</research>",
+                input_tokens=100, output_tokens=50,
+                model="test-model", finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<reply>了解</reply>",
+                input_tokens=200, output_tokens=80,
+                model="test-model", finish_reason="stop",
+            ),
+        ])
+        mgr.web_searcher = MagicMock()
+        mgr.web_searcher.search.return_value = [
+            SearchResult(title="Result 1", url="https://example.com", snippet="Snippet 1"),
+        ]
+
+        mgr.process_message("調べて", user_id="U123")
+
+        # LLM called twice: initial + follow-up after research
+        assert mgr.llm_client.chat.call_count == 2
+        # Second call should include research results in conversation
+        second_call_messages = mgr.llm_client.chat.call_args_list[1][0][0]
+        research_msg = [m for m in second_call_messages if m["role"] == "user" and "リサーチ結果" in m["content"]]
+        assert len(research_msg) == 1
+        assert "Result 1" in research_msg[0]["content"]
+
+    def test_research_action_empty_results(self, tmp_path: Path):
+        """When search returns no results, LLM still gets re-queried."""
+        mgr = _make_manager_with_research_llm(tmp_path, [
+            LLMResponse(
+                content="<research>obscure query</research>",
+                input_tokens=100, output_tokens=50,
+                model="test-model", finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<reply>見つかりませんでした</reply>",
+                input_tokens=200, output_tokens=80,
+                model="test-model", finish_reason="stop",
+            ),
+        ])
+        mgr.web_searcher = MagicMock()
+        mgr.web_searcher.search.return_value = []
+
+        mgr.process_message("調べて", user_id="U123")
+
+        assert mgr.llm_client.chat.call_count == 2
+        second_call_messages = mgr.llm_client.chat.call_args_list[1][0][0]
+        research_msg = [m for m in second_call_messages if m["role"] == "user" and "検索結果なし" in m["content"]]
+        assert len(research_msg) == 1
+
+    def test_research_action_records_llm_cost(self, tmp_path: Path):
+        """Follow-up LLM call after research is recorded in the ledger."""
+        mgr = _make_manager_with_research_llm(tmp_path, [
+            LLMResponse(
+                content="<research>cost test</research>",
+                input_tokens=100, output_tokens=50,
+                model="test-model", finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<reply>done</reply>",
+                input_tokens=200, output_tokens=80,
+                model="test-model", finish_reason="stop",
+            ),
+        ])
+        mgr.web_searcher = MagicMock()
+        mgr.web_searcher.search.return_value = []
+
+        mgr.process_message("テスト", user_id="U123")
+
+        # Two LLM calls recorded in ledger
+        llm_events = [e for e in mgr.state.ledger_events if e.event_type == "llm_call"]
+        assert len(llm_events) == 2
+
+    def test_research_notes_passed_to_system_prompt(self, tmp_path: Path):
+        """Recent research notes are included in the system prompt."""
+        mgr = _make_manager_with_research_llm(tmp_path, [
+            # First call: research
+            LLMResponse(
+                content="<research>first query</research>",
+                input_tokens=100, output_tokens=50,
+                model="test-model", finish_reason="stop",
+            ),
+            # Follow-up after research
+            LLMResponse(
+                content="<reply>ok</reply>",
+                input_tokens=200, output_tokens=80,
+                model="test-model", finish_reason="stop",
+            ),
+            # Second process_message call
+            LLMResponse(
+                content="<reply>参考にしました</reply>",
+                input_tokens=150, output_tokens=60,
+                model="test-model", finish_reason="stop",
+            ),
+        ])
+        mgr.web_searcher = MagicMock()
+        mgr.web_searcher.search.return_value = [
+            SearchResult(title="Saved Note", url="https://example.com/saved", snippet="Important info"),
+        ]
+
+        # First message triggers research and saves notes
+        mgr.process_message("調べて", user_id="U123")
+
+        # Second message should have research notes in system prompt
+        mgr.process_message("結果を教えて", user_id="U123")
+
+        third_call_messages = mgr.llm_client.chat.call_args_list[2][0][0]
+        system_prompt = third_call_messages[0]["content"]
+        assert "https://example.com/saved" in system_prompt
+
+    def test_research_note_save_failure_does_not_break_flow(self, tmp_path: Path):
+        """If saving a research note fails, processing continues."""
+        mgr = _make_manager_with_research_llm(tmp_path, [
+            LLMResponse(
+                content="<research>fail save test</research>",
+                input_tokens=100, output_tokens=50,
+                model="test-model", finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<reply>ok</reply>",
+                input_tokens=200, output_tokens=80,
+                model="test-model", finish_reason="stop",
+            ),
+        ])
+        mgr.web_searcher = MagicMock()
+        mgr.web_searcher.search.return_value = [
+            SearchResult(title="Test", url="https://example.com", snippet="test"),
+        ]
+        mgr.research_note_store = MagicMock()
+        mgr.research_note_store.save.side_effect = OSError("disk full")
+        mgr.research_note_store.recent.return_value = []
+
+        # Should not raise
+        mgr.process_message("テスト", user_id="U123")
+
+        # LLM was still re-queried
+        assert mgr.llm_client.chat.call_count == 2

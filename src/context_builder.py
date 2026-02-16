@@ -8,7 +8,7 @@ Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 7.3
 
 from __future__ import annotations
 
-from models import ConstitutionModel, ConversationEntry, DecisionLogEntry
+from models import ConstitutionModel, ConversationEntry, DecisionLogEntry, ResearchNote
 
 
 def build_system_prompt(
@@ -19,6 +19,7 @@ def build_system_prompt(
     budget_limit: float,
     conversation_history: list[ConversationEntry] | None = None,
     vision_text: str | None = None,
+    research_notes: list[ResearchNote] | None = None,
 ) -> str:
     """コンテキスト情報からシステムプロンプトを構築する."""
     sections: list[str] = [
@@ -39,6 +40,9 @@ def build_system_prompt(
 
     # --- 予算状況 ---
     sections.append(_build_budget_section(budget_spent, budget_limit))
+
+    # --- リサーチノート ---
+    sections.append(_build_research_section(research_notes))
 
     # --- 会話履歴 ---
     sections.append(_build_conversation_section(conversation_history))
@@ -122,6 +126,19 @@ def _build_format_section() -> str:
         "",
         "タグは複数組み合わせ可能です。タグなしの場合は全体がreplyとして扱われます。",
     ])
+
+
+def _build_research_section(
+    research_notes: list[ResearchNote] | None,
+) -> str:
+    lines = ["## リサーチノート"]
+    if not research_notes:
+        lines.append("リサーチノートなし")
+    else:
+        for note in research_notes[:10]:
+            ts = note.retrieved_at.strftime("%Y-%m-%d %H:%M:%S")
+            lines.append(f"- [{ts}] {note.source_url}\n  {note.summary}")
+    return "\n".join(lines)
 
 def _build_conversation_section(
     conversation_history: list[ConversationEntry] | None,

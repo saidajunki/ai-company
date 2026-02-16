@@ -556,3 +556,70 @@ class TestServiceEntry:
         )
         restored = ServiceEntry.model_validate_json(s.model_dump_json())
         assert restored == s
+
+
+# --- ResearchNote (Req 2.1, 2.2) ---
+
+from models import ResearchNote
+
+
+class TestResearchNote:
+    def test_valid_note_with_published_at(self):
+        n = ResearchNote(
+            query="AI company trends",
+            source_url="https://example.com/article",
+            title="AI Trends 2025",
+            snippet="AI companies are growing...",
+            summary="AI業界のトレンドまとめ",
+            published_at=datetime(2025, 1, 10, tzinfo=timezone.utc),
+            retrieved_at=NOW,
+        )
+        assert n.query == "AI company trends"
+        assert n.source_url == "https://example.com/article"
+        assert n.published_at is not None
+
+    def test_valid_note_without_published_at(self):
+        """published_at が不明な場合は None を許容する (Req 2.2)."""
+        n = ResearchNote(
+            query="test query",
+            source_url="https://example.com",
+            title="Test",
+            snippet="snippet",
+            summary="summary",
+            retrieved_at=NOW,
+        )
+        assert n.published_at is None
+
+    def test_missing_required_field(self):
+        with pytest.raises(ValidationError):
+            ResearchNote(
+                query="test",
+                source_url="https://example.com",
+                # missing title, snippet, summary, retrieved_at
+            )
+
+    def test_json_round_trip(self):
+        n = ResearchNote(
+            query="テストクエリ",
+            source_url="https://example.com/jp",
+            title="テスト記事",
+            snippet="スニペット",
+            summary="要約テスト",
+            published_at=datetime(2025, 1, 10, tzinfo=timezone.utc),
+            retrieved_at=NOW,
+        )
+        restored = ResearchNote.model_validate_json(n.model_dump_json())
+        assert restored == n
+
+    def test_json_round_trip_none_published_at(self):
+        n = ResearchNote(
+            query="query",
+            source_url="https://example.com",
+            title="title",
+            snippet="snippet",
+            summary="summary",
+            retrieved_at=NOW,
+        )
+        restored = ResearchNote.model_validate_json(n.model_dump_json())
+        assert restored == n
+        assert restored.published_at is None

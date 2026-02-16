@@ -34,6 +34,7 @@ from models import (
     ConversationEntry,
     HeartbeatState,
     LedgerEvent,
+    ResearchNote,
 )
 from pricing import (
     get_pricing_with_fallback,
@@ -43,9 +44,12 @@ from pricing import (
 from recovery import determine_recovery_action, RecoveryAction
 from report_formatter import CostSummary, ReportData, format_report
 from response_parser import Action, parse_response
+from research_note_store import ResearchNoteStore
 from service_registry import ServiceRegistry
 from shell_executor import ShellResult, execute_shell
 from sub_agent_runner import SubAgentRunner
+from git_publisher import GitPublisher
+from web_searcher import WebSearcher
 from task_queue import TaskQueue
 from vision_loader import VisionLoader
 
@@ -152,6 +156,9 @@ class Manager:
         self.service_registry = ServiceRegistry(base_dir, company_id)
         self.sub_agent_runner = SubAgentRunner(self)
         self.autonomous_loop = AutonomousLoop(self)
+        self.web_searcher = WebSearcher()
+        self.research_note_store = ResearchNoteStore(base_dir, company_id)
+        self.git_publisher = GitPublisher(work_dir=self.base_dir / "companies" / self.company_id)
 
     # ------------------------------------------------------------------
     # Startup (Req 7.1, 7.6)
@@ -430,6 +437,13 @@ class Manager:
                 logger.warning("Failed to load vision", exc_info=True)
                 vision_text = None
 
+            # Load recent research notes
+            try:
+                research_notes = self.research_note_store.recent()
+            except Exception:
+                logger.warning("Failed to load research notes", exc_info=True)
+                research_notes = None
+
             system_prompt = build_system_prompt(
                 constitution=self.state.constitution,
                 wip=self.state.wip,
@@ -438,6 +452,7 @@ class Manager:
                 budget_limit=limit,
                 conversation_history=conversation_history,
                 vision_text=vision_text,
+                research_notes=research_notes,
             )
 
             conversation: list[dict[str, str]] = [
@@ -540,6 +555,126 @@ class Manager:
                     conversation.append({"role": "user", "content": result_text})
 
                     # Re-query LLM with the shell result
+                    if self.llm_client is None:
+                        break
+
+                    llm_result = self.llm_client.chat(conversation)
+                    if isinstance(llm_result, LLMError):
+                        logger.error("Follow-up LLM call failed: %s", llm_result.message)
+                        self._slack_send(
+                            f"エラー: LLM再問い合わせに失敗しました — {llm_result.message}",
+                        )
+                        return
+
+                    self.record_llm_call(
+                        provider="openrouter",
+                        model=llm_result.model,
+                        input_tokens=llm_result.input_tokens,
+                        output_tokens=llm_result.output_tokens,
+                        task_id=task_id,
+                    )
+                    conversation.append({"role": "assistant", "content": llm_result.content})
+
+                    next_actions = parse_response(llm_result.content)
+                    break  # Process new actions in next iteration
+
+                elif action.action_type == "research":
+                    logger.info("Executing research: %s", action.content)
+                    search_results = self.web_searcher.search(action.content)
+
+                    # Save each result as a ResearchNote
+                    now = datetime.now(timezone.utc)
+                    for sr in search_results:
+                        note = ResearchNote(
+                            query=action.content,
+                            source_url=sr.url,
+                            title=sr.title,
+                            snippet=sr.snippet,
+                            summary=sr.snippet,
+                            retrieved_at=now,
+                        )
+                        try:
+                            self.research_note_store.save(note)
+                        except Exception:
+                            logger.warning("Failed to save research note", exc_info=True)
+
+                    # Build summary text
+                    if search_results:
+                        summary_parts = [f"リサーチ結果 (query={action.content}):"]
+                        for i, sr in enumerate(search_results, 1):
+                            summary_parts.append(f"{i}. {sr.title}\n   {sr.url}\n   {sr.snippet}")
+                        result_text = "\n".join(summary_parts)
+                    else:
+                        result_text = f"リサーチ結果 (query={action.content}): 検索結果なし"
+
+                    conversation.append({"role": "user", "content": result_text})
+
+                    # Re-query LLM with the results
+                    if self.llm_client is None:
+                        break
+
+                    llm_result = self.llm_client.chat(conversation)
+                    if isinstance(llm_result, LLMError):
+                        logger.error("Follow-up LLM call failed: %s", llm_result.message)
+                        self._slack_send(
+                            f"エラー: LLM再問い合わせに失敗しました — {llm_result.message}",
+                        )
+                        return
+
+                    self.record_llm_call(
+                        provider="openrouter",
+                        model=llm_result.model,
+                        input_tokens=llm_result.input_tokens,
+                        output_tokens=llm_result.output_tokens,
+                        task_id=task_id,
+                    )
+                    conversation.append({"role": "assistant", "content": llm_result.content})
+
+                    next_actions = parse_response(llm_result.content)
+                    break  # Process new actions in next iteration
+
+                elif action.action_type == "publish":
+                    logger.info("Executing publish: %s", action.content)
+                    content = action.content.strip()
+                    parts = content.split(":", 2)
+                    operation = parts[0] if parts else ""
+
+                    if operation == "create_repo" and len(parts) >= 3:
+                        repo_name = parts[1]
+                        description = parts[2]
+                        pub_result = self.git_publisher.create_repo(repo_name, description)
+                        if pub_result.success:
+                            try:
+                                self.service_registry.register(
+                                    name=repo_name,
+                                    description=description,
+                                    agent_id="manager",
+                                )
+                            except Exception:
+                                logger.warning("Failed to register service", exc_info=True)
+                            result_text = (
+                                f"公開結果: {pub_result.message}"
+                                f" (URL: {pub_result.repo_url})"
+                            )
+                        else:
+                            result_text = f"公開エラー: {pub_result.message}"
+
+                    elif operation == "commit" and len(parts) >= 3:
+                        repo_path_str = parts[1]
+                        message = parts[2]
+                        repo_path = work_dir / repo_path_str
+                        pub_result = self.git_publisher.commit_and_push(repo_path, message)
+                        if pub_result.success:
+                            result_text = f"公開結果: {pub_result.message}"
+                        else:
+                            result_text = f"公開エラー: {pub_result.message}"
+
+                    else:
+                        result_text = f"公開エラー: 不明な操作形式です: {content}"
+
+                    conversation.append({"role": "user", "content": result_text})
+
+                    # Re-query LLM with the results
                     if self.llm_client is None:
                         break
 

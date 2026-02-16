@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from context_builder import build_system_prompt
-from models import ConversationEntry
+from models import ConversationEntry, ResearchNote
 
 
 def _make_entry(role: str, content: str, ts: datetime | None = None) -> ConversationEntry:
@@ -121,3 +121,93 @@ class TestConversationHistorySection:
         )
         assert "## 会話履歴" in prompt
         assert "会話履歴なし" in prompt
+
+
+def _make_research_note(
+    summary: str = "テスト要約",
+    source_url: str = "https://example.com/article",
+    retrieved_at: datetime | None = None,
+    **kwargs,
+) -> ResearchNote:
+    return ResearchNote(
+        query="テストクエリ",
+        source_url=source_url,
+        title="テスト記事",
+        snippet="テストスニペット",
+        summary=summary,
+        retrieved_at=retrieved_at or datetime(2025, 7, 1, 12, 0, 0),
+        **kwargs,
+    )
+
+
+class TestResearchNotesSection:
+    """Tests for the リサーチノート section (Requirements 3.1, 3.2, 3.3)."""
+
+    def test_no_notes_shows_placeholder(self):
+        """Req 3.3: リサーチノートなし when no notes."""
+        prompt = _build_prompt(research_notes=None)
+        assert "## リサーチノート" in prompt
+        assert "リサーチノートなし" in prompt
+
+    def test_empty_list_shows_placeholder(self):
+        """Req 3.3: リサーチノートなし when empty list."""
+        prompt = _build_prompt(research_notes=[])
+        assert "リサーチノートなし" in prompt
+
+    def test_single_note_appears(self):
+        """Req 3.2: retrieved_at, source_url, summary are displayed."""
+        note = _make_research_note(
+            summary="AI市場の動向分析",
+            source_url="https://example.com/ai-trends",
+            retrieved_at=datetime(2025, 7, 1, 14, 30, 0),
+        )
+        prompt = _build_prompt(research_notes=[note])
+        assert "## リサーチノート" in prompt
+        assert "2025-07-01 14:30:00" in prompt
+        assert "https://example.com/ai-trends" in prompt
+        assert "AI市場の動向分析" in prompt
+        assert "リサーチノートなし" not in prompt
+
+    def test_multiple_notes_all_appear(self):
+        """Req 3.1: multiple notes are included."""
+        notes = [
+            _make_research_note(summary=f"要約{i}", source_url=f"https://example.com/{i}")
+            for i in range(3)
+        ]
+        prompt = _build_prompt(research_notes=notes)
+        for i in range(3):
+            assert f"要約{i}" in prompt
+            assert f"https://example.com/{i}" in prompt
+
+    def test_max_10_notes(self):
+        """Req 3.1: at most 10 notes are displayed."""
+        notes = [
+            _make_research_note(summary=f"要約{i}", source_url=f"https://example.com/{i}")
+            for i in range(15)
+        ]
+        prompt = _build_prompt(research_notes=notes)
+        for i in range(10):
+            assert f"要約{i}" in prompt
+        for i in range(10, 15):
+            assert f"要約{i}" not in prompt
+
+    def test_section_position_before_conversation(self):
+        """Research section appears between budget and conversation."""
+        note = _make_research_note()
+        prompt = _build_prompt(research_notes=[note])
+        budget_pos = prompt.index("## 予算状況")
+        research_pos = prompt.index("## リサーチノート")
+        conversation_pos = prompt.index("## 会話履歴")
+        assert budget_pos < research_pos < conversation_pos
+
+    def test_existing_callers_unaffected(self):
+        """Omitting research_notes still works (backward compat)."""
+        prompt = build_system_prompt(
+            constitution=None,
+            wip=[],
+            recent_decisions=[],
+            budget_spent=0.0,
+            budget_limit=10.0,
+        )
+        assert "## リサーチノート" in prompt
+        assert "リサーチノートなし" in prompt

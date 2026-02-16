@@ -212,3 +212,18 @@ class ServiceEntry(BaseModel):
     created_at: datetime
     updated_at: datetime
     agent_id: str
+
+
+# --- Research Note (Req 2.1, 2.2) ---
+
+class ResearchNote(BaseModel):
+    """リサーチノートモデル。Web検索結果を構造化して保存する。"""
+
+    query: str
+    source_url: str
+    title: str
+    snippet: str
+    summary: str
+    published_at: Optional[datetime] = None
+    retrieved_at: datetime
+
