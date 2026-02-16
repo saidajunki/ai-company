@@ -39,7 +39,7 @@ REPORT_INTERVAL = int(os.environ.get("REPORT_INTERVAL", "600"))  # 10 min
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-3-flash")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-3-flash-preview")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 _shutdown = False
