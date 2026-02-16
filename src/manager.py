@@ -61,6 +61,7 @@ from initiative_store import InitiativeStore
 from initiative_planner import InitiativePlanner
 from recovery_planner import RecoveryPlanner
 from strategy_analyzer import StrategyAnalyzer
+from model_catalog import build_model_catalog, format_model_catalog_for_prompt
 from web_searcher import WebSearcher
 from task_queue import TaskQueue
 from vision_loader import VisionLoader
@@ -814,6 +815,14 @@ class Manager:
             except Exception:
                 logger.warning("Failed to load task history", exc_info=True)
 
+            # モデルカタログ生成
+            model_catalog_text = None
+            try:
+                catalog = build_model_catalog(self.state.pricing_cache)
+                model_catalog_text = format_model_catalog_for_prompt(catalog) or None
+            except Exception:
+                logger.warning("Failed to build model catalog", exc_info=True)
+
             system_prompt = build_system_prompt(
                 constitution=self.state.constitution,
                 wip=self.state.wip,
@@ -827,6 +836,7 @@ class Manager:
                 task_history=task_history,
                 active_initiatives=self._load_active_initiatives(),
                 strategy_direction=self._load_strategy_direction(),
+                model_catalog_text=model_catalog_text,
             )
 
             conversation: list[dict[str, str]] = [
@@ -1120,6 +1130,7 @@ class Manager:
                             name=role,
                             role=role,
                             task_description=desc,
+                            model=action.model,
                         )
                         result_text = f"サブエージェント結果 (role={role}):\n{result}"
                     except Exception as exc:

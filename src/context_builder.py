@@ -47,6 +47,7 @@ def build_system_prompt(
     task_history: TaskHistoryContext | None = None,
     active_initiatives: list[InitiativeEntry] | None = None,
     strategy_direction: StrategyDirection | None = None,
+    model_catalog_text: str | None = None,
 ) -> str:
     """コンテキスト情報からシステムプロンプトを構築する."""
     sections: list[str] = [
@@ -85,6 +86,11 @@ def build_system_prompt(
 
     # --- 会話履歴 ---
     sections.append(_build_conversation_section(conversation_history))
+
+    # --- 利用可能なモデル ---
+    model_section = _build_model_catalog_section(model_catalog_text)
+    if model_section:
+        sections.append(model_section)
 
     # --- 応答フォーマット ---
     sections.append(_build_format_section())
@@ -199,8 +205,31 @@ def _build_format_section() -> str:
         "※ 指示が複数ステップを要する複雑なものの場合に<plan>タグを使用してください。",
         "※ 単純な指示には<plan>タグは不要です。従来のタグで直接応答してください。",
         "",
+        "<delegate>",
+        "role:タスク説明 model=モデル名",
+        "</delegate>",
+        "※ model=は省略可能。省略時はデフォルトモデルを使用。",
+        "",
         "タグは複数組み合わせ可能です。タグなしの場合は全体がreplyとして扱われます。",
     ])
+def _build_model_catalog_section(model_catalog_text: str | None) -> str:
+    """利用可能なモデルセクションを構築する."""
+    if not model_catalog_text:
+        return ""
+    return "\n".join([
+        "## 利用可能なモデル",
+        "",
+        "社員エージェントに委任する際、タスクに適したモデルを選択できます。",
+        "",
+        model_catalog_text,
+        "",
+        "タスク種別ごとの推奨:",
+        "- コーディング・分析: coding/analysisカテゴリのモデル",
+        "- 簡単なタスク・情報収集: fast/cheapカテゴリのモデル",
+        "- 汎用タスク: generalカテゴリのモデル",
+    ])
+
+
 
 
 def _truncate(text: str, max_len: int = _RESULT_TRUNCATE_LEN) -> str:

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from cost_aggregator import compute_window_cost
-from llm_client import LLMError
+from llm_client import LLMClient, LLMError
 from response_parser import parse_response
 from shell_executor import execute_shell
 
@@ -39,8 +39,16 @@ class SubAgentRunner:
         role: str,
         task_description: str,
         budget_limit_usd: float = 1.0,
+        model: str | None = None,
     ) -> str:
         """サブエージェントをスポーンし、タスクを実行する.
+
+        Args:
+            name: エージェント名
+            role: エージェントの役割
+            task_description: タスクの説明
+            budget_limit_usd: 予算上限（USD）
+            model: 使用するLLMモデル名。未指定/空文字列の場合はCEO_AIのモデルにフォールバック。
 
         Returns:
             結果文字列（完了メッセージまたはエラー）
@@ -53,16 +61,23 @@ class SubAgentRunner:
             logger.warning(msg)
             return msg
 
+        # Determine effective model (empty string treated as None)
+        effective_model = model or (
+            self.manager.llm_client.model if self.manager.llm_client else "unknown"
+        )
+
         # Generate agent_id
         agent_id = f"sub-{uuid4().hex[:6]}"
 
-        # Register in AgentRegistry
-        model = self.manager.llm_client.model if self.manager.llm_client else "unknown"
+        # Create independent LLMClient for this sub-agent
+        sub_client = self._create_llm_client(effective_model)
+
+        # Register in AgentRegistry with effective model name
         self.manager.agent_registry.register(
             agent_id=agent_id,
             name=name,
             role=role,
-            model=model,
+            model=effective_model,
             budget_limit_usd=budget_limit_usd,
         )
 
@@ -74,6 +89,7 @@ class SubAgentRunner:
                 system_prompt=system_prompt,
                 task_description=task_description,
                 budget_limit_usd=budget_limit_usd,
+                llm_client=sub_client,
             )
         except Exception as exc:
             logger.exception("Sub-agent %s failed: %s", agent_id, exc)
@@ -87,6 +103,23 @@ class SubAgentRunner:
             logger.warning("Failed to deactivate agent %s", agent_id, exc_info=True)
 
         return result
+
+    def _create_llm_client(self, model: str) -> LLMClient | None:
+        """指定モデルで独立LLMClientを生成する.
+
+        Args:
+            model: 使用するモデル名
+
+        Returns:
+            新しいLLMClientインスタンス。manager.llm_clientがNoneの場合はNone。
+        """
+        if self.manager.llm_client is None:
+            return None
+        return LLMClient(
+            api_key=self.manager.llm_client.api_key,
+            model=model,
+            timeout=self.manager.llm_client.timeout,
+        )
 
     def _build_sub_agent_prompt(self, role: str, task_description: str) -> str:
         """サブエージェント用のシステムプロンプトを構築する."""
@@ -107,9 +140,10 @@ class SubAgentRunner:
         system_prompt: str,
         task_description: str,
         budget_limit_usd: float,
+        llm_client: LLMClient | None = None,
     ) -> str:
         """LLM会話ループを実行し、結果を返す."""
-        if self.manager.llm_client is None:
+        if llm_client is None:
             return "エラー: LLMクライアントが設定されていません"
 
         conversation: list[dict[str, str]] = [
@@ -127,7 +161,7 @@ class SubAgentRunner:
                 return f"予算上限(${budget_limit_usd})に達したため停止しました"
 
             # LLM call
-            llm_result = self.manager.llm_client.chat(conversation)
+            llm_result = llm_client.chat(conversation)
 
             if isinstance(llm_result, LLMError):
                 logger.error("LLM call failed for agent %s: %s", agent_id, llm_result.message)

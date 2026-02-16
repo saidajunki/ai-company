@@ -329,3 +329,62 @@ class TestStrategySection:
         strategy_pos = prompt.index("## 戦略方針")
         research_pos = prompt.index("## リサーチノート")
         assert budget_pos < initiative_pos < strategy_pos < research_pos
+
+
+class TestModelCatalogSection:
+    """Tests for the 利用可能なモデル section added by model_catalog_text param."""
+
+    def test_no_catalog_omits_section(self):
+        prompt = _build_prompt(model_catalog_text=None)
+        assert "## 利用可能なモデル" not in prompt
+
+    def test_empty_string_omits_section(self):
+        prompt = _build_prompt(model_catalog_text="")
+        assert "## 利用可能なモデル" not in prompt
+
+    def test_catalog_text_appears(self):
+        catalog = "- google/gemini-2.5-flash [fast, cheap]"
+        prompt = _build_prompt(model_catalog_text=catalog)
+        assert "## 利用可能なモデル" in prompt
+        assert catalog in prompt
+
+    def test_catalog_includes_guidance(self):
+        prompt = _build_prompt(model_catalog_text="モデル一覧テスト")
+        assert "社員エージェントに委任する際、タスクに適したモデルを選択できます。" in prompt
+        assert "コーディング・分析: coding/analysisカテゴリのモデル" in prompt
+        assert "簡単なタスク・情報収集: fast/cheapカテゴリのモデル" in prompt
+        assert "汎用タスク: generalカテゴリのモデル" in prompt
+
+    def test_catalog_section_before_format(self):
+        prompt = _build_prompt(model_catalog_text="テストカタログ")
+        catalog_pos = prompt.index("## 利用可能なモデル")
+        format_pos = prompt.index("## 応答フォーマット")
+        assert catalog_pos < format_pos
+
+    def test_backward_compat_without_catalog(self):
+        prompt = build_system_prompt(
+            constitution=None,
+            wip=[],
+            recent_decisions=[],
+            budget_spent=0.0,
+            budget_limit=10.0,
+        )
+        assert "## 応答フォーマット" in prompt
+        assert "## 利用可能なモデル" not in prompt
+
+
+class TestDelegateFormatSection:
+    """Tests for delegate tag format in 応答フォーマット section."""
+
+    def test_delegate_tag_in_format(self):
+        prompt = _build_prompt()
+        assert "<delegate>" in prompt
+        assert "</delegate>" in prompt
+
+    def test_delegate_model_format_explained(self):
+        prompt = _build_prompt()
+        assert "role:タスク説明 model=モデル名" in prompt
+
+    def test_delegate_model_optional_note(self):
+        prompt = _build_prompt()
+        assert "model=は省略可能" in prompt

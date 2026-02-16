@@ -5,7 +5,106 @@ Requirements: 4.1, 7.1
 
 from __future__ import annotations
 
-from response_parser import Action, format_actions, parse_response
+from response_parser import Action, format_actions, parse_response, _extract_delegate_model
+
+
+# ---------------------------------------------------------------------------
+# _extract_delegate_model ユニットテスト
+# ---------------------------------------------------------------------------
+
+class TestExtractDelegateModel:
+    """_extract_delegate_model() のテスト."""
+
+    def test_extract_model_from_content(self):
+        content, model = _extract_delegate_model("worker:タスク説明 model=google/gemini-2.5-flash")
+        assert model == "google/gemini-2.5-flash"
+        assert content == "worker:タスク説明"
+
+    def test_no_model_returns_none(self):
+        content, model = _extract_delegate_model("worker:タスク説明")
+        assert model is None
+        assert content == "worker:タスク説明"
+
+    def test_empty_model_value_returns_none(self):
+        """空文字列のモデル名はNoneと同等に扱う."""
+        # model= の後にスペースが来る場合、\S+ はマッチしないのでNone
+        content, model = _extract_delegate_model("worker:タスク model= ")
+        assert model is None
+
+    def test_model_in_middle_of_content(self):
+        content, model = _extract_delegate_model("worker:タスク model=openai/gpt-4o 追加情報")
+        assert model == "openai/gpt-4o"
+        assert "worker:タスク" in content
+        assert "追加情報" in content
+        assert "model=" not in content
+
+    def test_content_preserved_without_model(self):
+        original = "engineer:コードレビュー実施"
+        content, model = _extract_delegate_model(original)
+        assert content == original
+        assert model is None
+
+
+# ---------------------------------------------------------------------------
+# delegate タグの model= パース
+# ---------------------------------------------------------------------------
+
+class TestDelegateModelParsing:
+    """parse_response() での delegate model= パーステスト."""
+
+    def test_delegate_with_model(self):
+        text = "<delegate>worker:タスク説明 model=google/gemini-2.5-flash</delegate>"
+        actions = parse_response(text)
+        assert len(actions) == 1
+        assert actions[0].action_type == "delegate"
+        assert actions[0].model == "google/gemini-2.5-flash"
+        assert actions[0].content == "worker:タスク説明"
+
+    def test_delegate_without_model(self):
+        text = "<delegate>worker:タスク説明</delegate>"
+        actions = parse_response(text)
+        assert len(actions) == 1
+        assert actions[0].action_type == "delegate"
+        assert actions[0].model is None
+        assert actions[0].content == "worker:タスク説明"
+
+    def test_non_delegate_tags_have_no_model(self):
+        """delegate以外のタグではmodel抽出しない."""
+        text = "<reply>model=some-model テスト</reply>"
+        actions = parse_response(text)
+        assert actions[0].model is None
+        assert "model=some-model" in actions[0].content
+
+    def test_delegate_with_complex_model_name(self):
+        text = "<delegate>coder:実装 model=anthropic/claude-sonnet-4-20250514</delegate>"
+        actions = parse_response(text)
+        assert actions[0].model == "anthropic/claude-sonnet-4-20250514"
+        assert actions[0].content == "coder:実装"
+
+    def test_delegate_model_with_slashes(self):
+        text = "<delegate>analyst:分析 model=deepseek/deepseek-chat</delegate>"
+        actions = parse_response(text)
+        assert actions[0].model == "deepseek/deepseek-chat"
+
+    def test_delegate_with_model_roundtrip(self):
+        """delegate + model の往復一貫性テスト (Requirements 2.5)."""
+        original = [Action(action_type="delegate", content="worker:タスク説明", model="google/gemini-2.5-flash")]
+        formatted = format_actions(original)
+        assert "model=google/gemini-2.5-flash" in formatted
+        reparsed = parse_response(formatted)
+        assert len(reparsed) == 1
+        assert reparsed[0].action_type == "delegate"
+        assert reparsed[0].content == "worker:タスク説明"
+        assert reparsed[0].model == "google/gemini-2.5-flash"
+        assert reparsed == original
+
+    def test_delegate_without_model_roundtrip(self):
+        """delegate model=None の往復一貫性テスト (Requirements 2.5)."""
+        original = [Action(action_type="delegate", content="worker:タスク説明")]
+        formatted = format_actions(original)
+        assert "model=" not in formatted
+        reparsed = parse_response(formatted)
+        assert reparsed == original
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +258,7 @@ class TestMixedTags:
             Action(action_type="research", content="query"),
             Action(action_type="publish", content="artifact"),
             Action(action_type="consult", content="相談したいです"),
+            Action(action_type="delegate", content="worker:タスク", model="google/gemini-2.5-flash"),
             Action(action_type="plan", content="1. タスク1\n2. タスク2"),
             Action(action_type="done", content="finished"),
         ]

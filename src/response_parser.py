@@ -37,6 +37,7 @@ class Action:
 
     action_type: Literal["shell_command", "reply", "done", "research", "publish", "consult", "delegate", "plan"]
     content: str
+    model: str | None = None  # delegateアクション用のモデル指定
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +64,27 @@ _TAG_PATTERN = re.compile(
     re.DOTALL,
 )
 
+# Regex for extracting model= parameter from delegate content.
+_DELEGATE_MODEL_PATTERN = re.compile(r'\bmodel=(\S+)')
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _extract_delegate_model(content: str) -> tuple[str, str | None]:
+    """delegateコンテンツからmodel指定を抽出する.
+
+    Returns:
+        (model指定を除いたコンテンツ, モデル名 or None)
+    """
+    match = _DELEGATE_MODEL_PATTERN.search(content)
+    if match:
+        model = match.group(1)
+        cleaned = content[:match.start()].rstrip() + content[match.end():]
+        return cleaned.strip(), model if model else None
+    return content, None
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -82,9 +104,13 @@ def parse_response(text: str) -> list[Action]:
     for match in _TAG_PATTERN.finditer(text):
         tag = match.group(1)
         content = match.group(2)
+        model = None
+        if tag == "delegate":
+            content, model = _extract_delegate_model(content)
         actions.append(Action(
             action_type=_TAG_TO_ACTION[tag],
             content=content,
+            model=model,
         ))
 
     # タグなしの場合は全体を reply として扱う
@@ -107,7 +133,10 @@ def format_actions(actions: list[Action]) -> str:
 
     for action in actions:
         tag = _ACTION_TO_TAG[action.action_type]
-        parts.append(f"<{tag}>\n{action.content}\n</{tag}>")
+        content = action.content
+        if action.action_type == "delegate" and action.model is not None:
+            content = f"{content} model={action.model}"
+        parts.append(f"<{tag}>\n{content}\n</{tag}>")
 
     return "\n\n".join(parts)
 

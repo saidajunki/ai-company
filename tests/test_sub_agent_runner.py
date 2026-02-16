@@ -9,13 +9,29 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_registry import AgentRegistry
-from llm_client import LLMError, LLMResponse
+from llm_client import LLMClient, LLMError, LLMResponse
 from manager import Manager, init_company_directory
 from models import LedgerEvent
 from sub_agent_runner import SubAgentRunner, DEFAULT_WIP_LIMIT, MAX_CONVERSATION_TURNS
 
 
 CID = "test-co"
+
+
+def _make_mock_llm() -> MagicMock:
+    """Create a standard mocked LLM client."""
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.model = "test-model"
+    mock_llm.api_key = "test-api-key"
+    mock_llm.timeout = 30.0
+    mock_llm.chat.return_value = LLMResponse(
+        content="<done>タスク完了</done>",
+        input_tokens=100,
+        output_tokens=50,
+        model="test-model",
+        finish_reason="stop",
+    )
+    return mock_llm
 
 
 def _make_manager(tmp_path: Path) -> Manager:
@@ -27,16 +43,7 @@ def _make_manager(tmp_path: Path) -> Manager:
     mgr.agent_registry = AgentRegistry(tmp_path, CID)
 
     # Set up mocked LLM client
-    mock_llm = MagicMock()
-    mock_llm.model = "test-model"
-    mock_llm.chat.return_value = LLMResponse(
-        content="<done>タスク完了</done>",
-        input_tokens=100,
-        output_tokens=50,
-        model="test-model",
-        finish_reason="stop",
-    )
-    mgr.llm_client = mock_llm
+    mgr.llm_client = _make_mock_llm()
     mgr.slack = MagicMock()
     return mgr
 
@@ -97,7 +104,9 @@ class TestWipLimit:
 
     def test_spawn_allowed_when_under_limit(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
+        mock_sub = _make_mock_llm()
         runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
 
         # Register 2 active non-CEO agents (under limit of 3)
         for i in range(2):
@@ -114,7 +123,9 @@ class TestWipLimit:
 
     def test_ceo_not_counted_in_wip(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
+        mock_sub = _make_mock_llm()
         runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
 
         # Register CEO + 2 non-CEO agents
         mgr.agent_registry.ensure_ceo("test-model")
@@ -138,14 +149,18 @@ class TestWipLimit:
 class TestSpawnFlow:
     def test_spawn_returns_done_content(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
+        mock_sub = _make_mock_llm()
         runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
 
         result = runner.spawn("Worker", "developer", "コードを書く")
         assert result == "タスク完了"
 
     def test_spawn_registers_agent(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
+        mock_sub = _make_mock_llm()
         runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
 
         runner.spawn("Worker", "developer", "コードを書く")
 
@@ -156,7 +171,9 @@ class TestSpawnFlow:
 
     def test_spawn_records_llm_cost(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
+        mock_sub = _make_mock_llm()
         runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
 
         runner.spawn("Worker", "developer", "コードを書く")
 
@@ -169,7 +186,9 @@ class TestSpawnFlow:
 
     def test_spawn_deactivates_agent_after_completion(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
+        mock_sub = _make_mock_llm()
         runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
 
         runner.spawn("Worker", "developer", "コードを書く")
 
@@ -181,11 +200,13 @@ class TestSpawnFlow:
 
     def test_spawn_with_llm_error(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
-        mgr.llm_client.chat.return_value = LLMError(
+        mock_sub = _make_mock_llm()
+        mock_sub.chat.return_value = LLMError(
             error_type="api_error",
             message="API failure",
         )
         runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
 
         result = runner.spawn("Worker", "developer", "コードを書く")
         assert "LLMエラー" in result
@@ -209,6 +230,7 @@ class TestBudgetEnforcement:
         runner = SubAgentRunner(mgr)
 
         call_count = 0
+        mock_sub = _make_mock_llm()
 
         def mock_chat(messages):
             nonlocal call_count
@@ -230,7 +252,8 @@ class TestBudgetEnforcement:
                 finish_reason="stop",
             )
 
-        mgr.llm_client.chat.side_effect = mock_chat
+        mock_sub.chat.side_effect = mock_chat
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
 
         # Pre-populate ledger with costs that will exceed budget on first check
         # We need to know the agent_id, so we patch uuid4
@@ -271,6 +294,7 @@ class TestShellExecution:
         runner = SubAgentRunner(mgr)
 
         call_count = 0
+        mock_sub = _make_mock_llm()
 
         def mock_chat(messages):
             nonlocal call_count
@@ -291,7 +315,8 @@ class TestShellExecution:
                 finish_reason="stop",
             )
 
-        mgr.llm_client.chat.side_effect = mock_chat
+        mock_sub.chat.side_effect = mock_chat
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
 
         result = runner.spawn("Worker", "developer", "echo実行")
         assert result == "シェル実行完了"
@@ -307,15 +332,100 @@ class TestMaxTurns:
         mgr = _make_manager(tmp_path)
         runner = SubAgentRunner(mgr)
 
+        mock_sub = _make_mock_llm()
         # Always return shell commands to keep looping
-        mgr.llm_client.chat.return_value = LLMResponse(
+        mock_sub.chat.return_value = LLMResponse(
             content="<shell>echo loop</shell>",
             input_tokens=10,
             output_tokens=10,
             model="test-model",
             finish_reason="stop",
         )
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
 
         result = runner.spawn("Worker", "developer", "無限ループ")
         assert "最大会話ターン数" in result
-        assert mgr.llm_client.chat.call_count == MAX_CONVERSATION_TURNS
+        assert mock_sub.chat.call_count == MAX_CONVERSATION_TURNS
+
+
+# ---------------------------------------------------------------------------
+# Model selection (Task 2.1)
+# ---------------------------------------------------------------------------
+
+class TestModelSelection:
+    """Tests for spawn() model parameter and _create_llm_client()."""
+
+    def test_spawn_with_explicit_model_registers_that_model(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mock_sub = _make_mock_llm()
+        runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
+
+        runner.spawn("Worker", "developer", "コードを書く", model="google/gemini-2.5-flash")
+
+        all_agents = mgr.agent_registry._list_all()
+        sub_agents = [a for a in all_agents if a.agent_id.startswith("sub-")]
+        assert len(sub_agents) == 1
+        assert sub_agents[0].model == "google/gemini-2.5-flash"
+
+    def test_spawn_without_model_falls_back_to_ceo_model(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mock_sub = _make_mock_llm()
+        runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
+
+        runner.spawn("Worker", "developer", "コードを書く")
+
+        all_agents = mgr.agent_registry._list_all()
+        sub_agents = [a for a in all_agents if a.agent_id.startswith("sub-")]
+        assert len(sub_agents) == 1
+        assert sub_agents[0].model == "test-model"
+
+    def test_spawn_with_empty_string_model_falls_back_to_ceo(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mock_sub = _make_mock_llm()
+        runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
+
+        runner.spawn("Worker", "developer", "コードを書く", model="")
+
+        all_agents = mgr.agent_registry._list_all()
+        sub_agents = [a for a in all_agents if a.agent_id.startswith("sub-")]
+        assert len(sub_agents) == 1
+        assert sub_agents[0].model == "test-model"
+
+    def test_spawn_without_llm_client_uses_unknown_model(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.llm_client = None
+        runner = SubAgentRunner(mgr)
+
+        runner.spawn("Worker", "developer", "コードを書く")
+
+        all_agents = mgr.agent_registry._list_all()
+        sub_agents = [a for a in all_agents if a.agent_id.startswith("sub-")]
+        assert len(sub_agents) == 1
+        assert sub_agents[0].model == "unknown"
+
+    def test_create_llm_client_returns_independent_instance(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        # Use a real LLMClient for the manager so _create_llm_client works
+        mgr.llm_client = LLMClient(api_key="test-key", model="ceo-model", timeout=60.0)
+        runner = SubAgentRunner(mgr)
+
+        sub_client = runner._create_llm_client("sub-model")
+
+        assert sub_client is not None
+        assert isinstance(sub_client, LLMClient)
+        assert sub_client.model == "sub-model"
+        assert sub_client.api_key == "test-key"
+        assert sub_client.timeout == 60.0
+        assert sub_client is not mgr.llm_client
+
+    def test_create_llm_client_returns_none_when_no_manager_client(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.llm_client = None
+        runner = SubAgentRunner(mgr)
+
+        result = runner._create_llm_client("some-model")
+
+        assert result is None
