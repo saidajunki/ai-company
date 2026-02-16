@@ -42,6 +42,7 @@ def generate_approval_message(request: ApprovalRequest) -> tuple[str, str]:
         f"⏪ 取り消し手順: {request.rollback_procedure}\n"
         f"📊 実行による変化: {request.impact_description}\n"
         f"\n"
-        f"✅ = 承認 / ❌ = 却下"
+        f"このメッセージへのスレッド返信で、自由記述で意思（進めて/やめて等）を返してください。\n"
+        f"（互換: ✅ = 承認 / ❌ = 却下 でも可）"
     )
     return request_id, message

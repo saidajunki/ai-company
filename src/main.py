@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from amendment import approve_amendment, reject_amendment
+from approval_text_classifier import classify_approval_text
 from llm_client import LLMClient
 from manager import Manager, init_company_directory
 from manager_state import constitution_path
@@ -36,9 +37,11 @@ COMPANY_ID = os.environ.get("COMPANY_ID", "alpha")
 BASE_DIR = Path(os.environ.get("BASE_DIR", "/app/data"))
 HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", "180"))  # 3 min
 REPORT_INTERVAL = int(os.environ.get("REPORT_INTERVAL", "600"))  # 10 min
+DAILY_BRIEF_INTERVAL = int(os.environ.get("DAILY_BRIEF_INTERVAL", "0"))  # disabled by default
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
+CREATOR_SLACK_USER_ID = os.environ.get("CREATOR_SLACK_USER_ID", "").strip() or None
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-3-flash-preview")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
@@ -154,15 +157,106 @@ def main() -> None:
                     f"⚠️ 承認処理中にエラーが発生しました (request_id: {request_id})"
                 )
 
+        def on_approval_text(request_id: str, text: str, user_id: str) -> None:
+            """Handle free-form approval replies (thread reply preferred)."""
+            log.info("Approval text for %s by %s: %s", request_id, user_id, text[:120])
+
+            # Find pending proposal in decision_log by request_id
+            proposal = None
+            already_processed = False
+            for entry in mgr.state.decision_log:
+                if entry.request_id == request_id:
+                    if entry.status in ("approved", "rejected"):
+                        already_processed = True
+                        break
+                    if entry.status == "proposed":
+                        proposal = entry
+
+            if already_processed:
+                slack.send_message(
+                    f"⚠️ 承認リクエスト `{request_id}` は既に処理済みです"
+                )
+                return
+
+            if proposal is None:
+                slack.send_message(
+                    f"⚠️ 承認リクエスト `{request_id}` に対応する提案が見つかりません"
+                )
+                return
+
+            request_summary = (
+                f"request_id={request_id}\n"
+                f"decision={proposal.decision}\n"
+                f"why={proposal.why}\n"
+                f"scope={proposal.scope}\n"
+            )
+            decision = classify_approval_text(
+                text,
+                request_summary=request_summary,
+                llm_client=mgr.llm_client,
+            )
+
+            if decision == "unknown":
+                slack.send_message(
+                    f"⚠️ 判定できませんでした: `{request_id}`\n"
+                    f"スレッドで「OK/NG」「進めて/やめて」など意図が分かる形で返信してください。"
+                )
+                return
+
+            const_path = constitution_path(BASE_DIR, COMPANY_ID)
+
+            try:
+                if decision == "approved":
+                    updated = approve_amendment(
+                        constitution=mgr.state.constitution,
+                        proposal=proposal,
+                        constitution_path=const_path,
+                        base_dir=BASE_DIR,
+                        company_id=COMPANY_ID,
+                    )
+                    mgr.state.constitution = updated
+                    from manager_state import restore_state
+                    mgr.state.decision_log = restore_state(BASE_DIR, COMPANY_ID).decision_log
+                    slack.send_message(
+                        f"✅ 憲法変更が承認されました (v{updated.version})\n"
+                        f"変更内容: {proposal.decision}"
+                    )
+                    log.info("Amendment approved via text: %s (v%d)", proposal.decision, updated.version)
+
+                elif decision == "rejected":
+                    reject_amendment(
+                        proposal=proposal,
+                        base_dir=BASE_DIR,
+                        company_id=COMPANY_ID,
+                    )
+                    from manager_state import restore_state
+                    mgr.state.decision_log = restore_state(BASE_DIR, COMPANY_ID).decision_log
+                    slack.send_message(
+                        f"❌ 憲法変更が却下されました\n"
+                        f"変更内容: {proposal.decision}"
+                    )
+                    log.info("Amendment rejected via text: %s", proposal.decision)
+
+            except Exception:
+                log.exception("Error processing approval text for %s", request_id)
+                slack.send_message(
+                    f"⚠️ 承認処理中にエラーが発生しました (request_id: {request_id})"
+                )
+
         def on_message(text: str, user_id: str) -> None:
             log.info("Creator message: %s (from %s)", text[:100], user_id)
             mgr.process_message(text, user_id)
+
+        approval_store_path = BASE_DIR / "companies" / COMPANY_ID / "state" / "slack_approval_mapping.json"
 
         slack = SlackBot(
             bot_token=SLACK_BOT_TOKEN,
             app_token=SLACK_APP_TOKEN,
             on_reaction=on_reaction,
             on_message=on_message,
+            on_approval_text=on_approval_text,
+            approval_store_path=approval_store_path,
+            creator_user_id=CREATOR_SLACK_USER_ID,
         )
         slack.start()
         mgr.slack = slack
@@ -178,6 +272,7 @@ def main() -> None:
 
     # --- Main loop ---
     last_report_at = time.monotonic()
+    last_daily_brief_at = time.monotonic()
     log.info("Entering main loop (heartbeat every %ds, report every %ds)...", HEARTBEAT_INTERVAL, REPORT_INTERVAL)
 
     while not _shutdown:
@@ -214,6 +309,19 @@ def main() -> None:
                     last_report_at = time.monotonic()
                 except Exception:
                     log.exception("Failed to send 10-min report")
+
+            # Send daily brief (optional; KPI loop)
+            if DAILY_BRIEF_INTERVAL > 0 and slack:
+                daily_elapsed = time.monotonic() - last_daily_brief_at
+                if daily_elapsed >= DAILY_BRIEF_INTERVAL:
+                    try:
+                        brief = mgr.generate_daily_brief()
+                        ts = slack.send_report(brief)
+                        if ts:
+                            log.info("Daily brief sent (ts=%s)", ts)
+                        last_daily_brief_at = time.monotonic()
+                    except Exception:
+                        log.exception("Failed to send daily brief")
 
         except Exception:
             log.exception("Error in main loop iteration")

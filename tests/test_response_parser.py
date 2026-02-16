@@ -106,8 +106,30 @@ class TestMixedTags:
             Action(action_type="reply", content="hello"),
             Action(action_type="research", content="query"),
             Action(action_type="publish", content="artifact"),
+            Action(action_type="consult", content="相談したいです"),
             Action(action_type="done", content="finished"),
         ]
+        formatted = format_actions(original)
+        reparsed = parse_response(formatted)
+        assert reparsed == original
+
+
+# ---------------------------------------------------------------------------
+# consult タグ
+# ---------------------------------------------------------------------------
+
+class TestConsultTag:
+    """<consult> タグの解析テスト."""
+
+    def test_parse_consult_tag(self):
+        text = "<consult>相談: どちらが良い？</consult>"
+        actions = parse_response(text)
+        assert len(actions) == 1
+        assert actions[0].action_type == "consult"
+        assert "どちらが良い" in actions[0].content
+
+    def test_format_consult_roundtrip(self):
+        original = [Action(action_type="consult", content="相談内容")]
         formatted = format_actions(original)
         reparsed = parse_response(formatted)
         assert reparsed == original

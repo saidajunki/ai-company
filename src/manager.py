@@ -19,9 +19,12 @@ from typing import Literal
 from agent_registry import AgentRegistry
 from autonomous_loop import AutonomousLoop
 from constitution_store import constitution_save
-from context_builder import build_system_prompt
+from context_builder import build_system_prompt, TaskHistoryContext
 from conversation_memory import ConversationMemory
 from cost_aggregator import compute_window_cost, is_budget_exceeded
+from creator_review_parser import parse_creator_review
+from creator_review_store import CreatorReviewStore
+from daily_brief_formatter import DailyBriefData, DailyCostSummary, format_daily_brief
 from heartbeat import update_heartbeat, update_heartbeat_on_report
 from llm_client import LLMClient, LLMError, LLMResponse
 from manager_state import (
@@ -45,6 +48,7 @@ from recovery import determine_recovery_action, RecoveryAction
 from report_formatter import CostSummary, ReportData, format_report
 from response_parser import Action, parse_response
 from research_note_store import ResearchNoteStore
+from consultation_store import ConsultationStore
 from service_registry import ServiceRegistry
 from shell_executor import ShellResult, execute_shell
 from sub_agent_runner import SubAgentRunner
@@ -148,6 +152,8 @@ class Manager:
 
         # Conversation memory (Req 1.1, 1.5)
         self.conversation_memory = ConversationMemory(base_dir, company_id)
+        self.creator_review_store = CreatorReviewStore(base_dir, company_id)
+        self.consultation_store = ConsultationStore(base_dir, company_id)
 
         # Autonomous growth components
         self.vision_loader = VisionLoader(base_dir, company_id)
@@ -407,6 +413,129 @@ class Manager:
         return report
 
     # ------------------------------------------------------------------
+    # Creator daily brief (KPI loop)
+    # ------------------------------------------------------------------
+
+    def generate_daily_brief(self) -> str:
+        """Generate a Creator日報 (施策/相談/コスト/スコア) for the KPI loop."""
+        now = datetime.now(timezone.utc)
+
+        # Planned initiatives (pending tasks)
+        planned: list[str] = []
+        try:
+            pending = self.task_queue.list_by_status("pending")
+            pending.sort(key=lambda t: t.priority)
+            for t in pending[:7]:
+                planned.append(f"[{t.task_id}] P{t.priority} {t.description}")
+        except Exception:
+            logger.warning("Failed to get planned initiatives for daily brief", exc_info=True)
+
+        # Active initiatives (running tasks + WIP)
+        active: list[str] = []
+        try:
+            running = self.task_queue.list_by_status("running")
+            running.sort(key=lambda t: t.priority)
+            for t in running[:7]:
+                active.append(f"[{t.task_id}] P{t.priority} {t.description}")
+        except Exception:
+            logger.warning("Failed to get active initiatives for daily brief", exc_info=True)
+
+        for w in self.state.wip[:3]:
+            if w and w not in active:
+                active.append(f"(WIP) {w}")
+
+        # Consultations (pending)
+        consultations: list[str] = []
+
+        try:
+            pending_consults = self.consultation_store.list_by_status("pending")
+            pending_consults.sort(key=lambda c: c.created_at)
+            for c in pending_consults[:10]:
+                first_line = (c.content or "").strip().splitlines()[0] if c.content else ""
+                if len(first_line) > 120:
+                    first_line = first_line[:120] + "…"
+                consultations.append(f"[consult_id: {c.consultation_id}] {first_line}")
+        except Exception:
+            logger.warning("Failed to load consultations for daily brief", exc_info=True)
+
+        # Include pending constitution amendment approvals as "consultations"
+        try:
+            processed: set[str] = {
+                e.request_id
+                for e in self.state.decision_log
+                if e.request_id and e.status in ("approved", "rejected")
+            }
+            for entry in self.state.decision_log:
+                if (
+                    entry.status == "proposed"
+                    and entry.request_id
+                    and entry.request_id not in processed
+                ):
+                    consultations.append(
+                        f"[request_id: {entry.request_id}] 憲法変更提案: {entry.decision}"
+                    )
+        except Exception:
+            logger.warning("Failed to load proposed amendments for daily brief", exc_info=True)
+
+        # Cost summary
+        limit = DEFAULT_BUDGET_LIMIT_USD
+        if self.state.constitution and self.state.constitution.budget:
+            limit = self.state.constitution.budget.limit_usd
+
+        spent_60m = compute_window_cost(self.state.ledger_events, now, window_minutes=60)
+        spent_24h = compute_window_cost(self.state.ledger_events, now, window_minutes=60 * 24)
+
+        cost = DailyCostSummary(
+            spent_usd_60m=spent_60m,
+            spent_usd_24h=spent_24h,
+            budget_limit_usd_60m=limit,
+        )
+
+        # Latest creator score
+        latest_review_text = ""
+        try:
+            latest = self.creator_review_store.latest()
+            if latest:
+                axis = []
+                if latest.score_interestingness_25 is not None:
+                    axis.append(f"面白さ{latest.score_interestingness_25}/25")
+                if latest.score_cost_efficiency_25 is not None:
+                    axis.append(f"コスト効率{latest.score_cost_efficiency_25}/25")
+                if latest.score_realism_25 is not None:
+                    axis.append(f"現実性{latest.score_realism_25}/25")
+                if latest.score_evolvability_25 is not None:
+                    axis.append(f"進化性{latest.score_evolvability_25}/25")
+                axis_text = " ".join(axis) if axis else "軸スコアなし"
+                ts = latest.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                comment = (latest.comment or "").strip()
+                if comment:
+                    latest_review_text = f"- [{ts}] {latest.score_total_100}/100 ({axis_text})\n  {comment}"
+                else:
+                    latest_review_text = f"- [{ts}] {latest.score_total_100}/100 ({axis_text})"
+        except Exception:
+            logger.warning("Failed to load latest creator review", exc_info=True)
+
+        reply_format = ""
+        try:
+            if self.state.constitution and self.state.constitution.creator_score_policy:
+                reply_format = self.state.constitution.creator_score_policy.creator_reply_format
+        except Exception:
+            pass
+
+        data = DailyBriefData(
+            timestamp=now,
+            company_id=self.company_id,
+            planned_initiatives=planned,
+            active_initiatives=active,
+            consultations=consultations,
+            cost=cost,
+            latest_creator_score=latest_review_text,
+            creator_reply_format=reply_format,
+        )
+
+        return format_daily_brief(data)
+
+    # ------------------------------------------------------------------
     # Message processing — Think → Act → Report (Req 3.1–3.4, 4.1–4.6)
     # ------------------------------------------------------------------
 
@@ -459,6 +588,50 @@ class Manager:
         logger.info("process_message start: user=%s task=%s", user_id, task_id)
 
         try:
+            stripped = (text or "").strip()
+
+            # --- Fast paths (no LLM required) ---
+            if stripped in ("日報", "creator日報", "daily", "daily brief", "daily report"):
+                self._slack_send(self.generate_daily_brief())
+                return
+
+            # Creator score feedback (KPI loop)
+            review = parse_creator_review(text, user_id=user_id)
+            if review is not None:
+                try:
+                    self.creator_review_store.save(review)
+                    axes = []
+                    if review.score_interestingness_25 is not None:
+                        axes.append(f"面白さ{review.score_interestingness_25}/25")
+                    if review.score_cost_efficiency_25 is not None:
+                        axes.append(f"コスト効率{review.score_cost_efficiency_25}/25")
+                    if review.score_realism_25 is not None:
+                        axes.append(f"現実性{review.score_realism_25}/25")
+                    if review.score_evolvability_25 is not None:
+                        axes.append(f"進化性{review.score_evolvability_25}/25")
+                    axis_text = " ".join(axes) if axes else "軸スコアなし"
+                    self._slack_send(
+                        f"✅ Creatorスコアを記録しました: {review.score_total_100}/100 ({axis_text})"
+                    )
+                except Exception:
+                    logger.warning("Failed to save creator review", exc_info=True)
+                    self._slack_send("⚠️ Creatorスコアの保存に失敗しました")
+                return
+
+            # Resolve consultation (optional helper)
+            try:
+                import re
+
+                m = re.match(r"^(?:resolve|解決)\s+([0-9a-f]{8})(?:\s*[:：]\s*(.*))?$", stripped, re.IGNORECASE)
+                if m:
+                    consult_id = m.group(1)
+                    resolution = (m.group(2) or "").strip()
+                    updated = self.consultation_store.resolve(consult_id, resolution=resolution)
+                    self._slack_send(f"✅ 相談を解決として記録しました: {updated.consultation_id}")
+                    return
+            except Exception:
+                logger.warning("Failed to resolve consultation command", exc_info=True)
+
             # 1. 予算チェック
             if self.check_budget():
                 logger.warning("Budget exceeded, rejecting message")
@@ -513,6 +686,29 @@ class Manager:
                 logger.warning("Failed to load research notes", exc_info=True)
                 research_notes = None
 
+            # Load recent creator reviews (KPI loop)
+            try:
+                creator_reviews = self.creator_review_store.recent(limit=3)
+            except Exception:
+                logger.warning("Failed to load creator reviews", exc_info=True)
+                creator_reviews = None
+
+            # Load task history for context
+            task_history = None
+            try:
+                completed = self.task_queue.list_by_status("completed")
+                completed.sort(key=lambda t: t.updated_at, reverse=True)
+                failed = self.task_queue.list_by_status("failed")
+                failed.sort(key=lambda t: t.updated_at, reverse=True)
+                running = self.task_queue.list_by_status("running")
+                task_history = TaskHistoryContext(
+                    completed=completed[:10],
+                    failed=failed[:5],
+                    running=running,
+                )
+            except Exception:
+                logger.warning("Failed to load task history", exc_info=True)
+
             system_prompt = build_system_prompt(
                 constitution=self.state.constitution,
                 wip=self.state.wip,
@@ -521,7 +717,9 @@ class Manager:
                 budget_limit=limit,
                 conversation_history=conversation_history,
                 vision_text=vision_text,
+                creator_reviews=creator_reviews,
                 research_notes=research_notes,
+                task_history=task_history,
             )
 
             conversation: list[dict[str, str]] = [
@@ -647,6 +845,24 @@ class Manager:
                     next_actions = parse_response(llm_result.content)
                     break  # Process new actions in next iteration
 
+                elif action.action_type == "consult":
+                    logger.info("Consultation requested: %s", action.content[:120])
+                    try:
+                        entry = self.consultation_store.add(
+                            action.content.strip(),
+                            related_task_id=task_id,
+                        )
+                        message = (
+                            f"🤝 相談 [consult_id: {entry.consultation_id}]\n\n"
+                            f"{action.content.strip()}\n\n"
+                            f"（解決メモを残す場合: `resolve {entry.consultation_id}: ...`）"
+                        )
+                    except Exception:
+                        logger.warning("Failed to record consultation", exc_info=True)
+                        message = f"🤝 相談\n\n{action.content.strip()}"
+                    self._slack_send(message)
+                    return
+
                 elif action.action_type == "research":
                     logger.info("Executing research: %s", action.content)
                     search_results = self.web_searcher.search(action.content)
@@ -740,6 +956,50 @@ class Manager:
 
                     else:
                         result_text = f"公開エラー: 不明な操作形式です: {content}"
+
+                    conversation.append({"role": "user", "content": result_text})
+
+                    # Re-query LLM with the results
+                    if self.llm_client is None:
+                        break
+
+                    llm_result = self.llm_client.chat(conversation)
+                    if isinstance(llm_result, LLMError):
+                        logger.error("Follow-up LLM call failed: %s", llm_result.message)
+                        self._slack_send(
+                            f"エラー: LLM再問い合わせに失敗しました — {llm_result.message}",
+                        )
+                        return
+
+                    self.record_llm_call(
+                        provider="openrouter",
+                        model=llm_result.model,
+                        input_tokens=llm_result.input_tokens,
+                        output_tokens=llm_result.output_tokens,
+                        task_id=task_id,
+                    )
+                    conversation.append({"role": "assistant", "content": llm_result.content})
+
+                    next_actions = parse_response(llm_result.content)
+                    break  # Process new actions in next iteration
+
+                elif action.action_type == "delegate":
+                    logger.info("Delegating to sub-agent: %s", action.content[:120])
+                    content = action.content.strip()
+                    role, _, desc = content.partition(":")
+                    role = role.strip() or "worker"
+                    desc = desc.strip() or content
+
+                    try:
+                        result = self.sub_agent_runner.spawn(
+                            name=role,
+                            role=role,
+                            task_description=desc,
+                        )
+                        result_text = f"サブエージェント結果 (role={role}):\n{result}"
+                    except Exception as exc:
+                        logger.warning("Sub-agent spawn failed: %s", exc, exc_info=True)
+                        result_text = f"サブエージェントエラー (role={role}): {exc}"
 
                     conversation.append({"role": "user", "content": result_text})
 

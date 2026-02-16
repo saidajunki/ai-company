@@ -23,11 +23,12 @@ class TestConstitutionModel:
     def test_default_creation(self):
         c = ConstitutionModel()
         assert c.version == 1
-        assert c.purpose == "研究開発中心のAI組織"
+        assert c.purpose == "有名で面白い存在になり、収益化を目指すAI会社"
         assert c.budget.limit_usd == 10
         assert c.budget.window_minutes == 60
         assert c.work_principles.wip_limit == 3
         assert c.disclosure_policy.default == "public"
+        assert c.disclosure_policy.sensitive_info_allowed is False
 
     def test_custom_values(self):
         c = ConstitutionModel(version=2, purpose="テスト組織")

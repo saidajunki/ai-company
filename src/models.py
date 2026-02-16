@@ -20,8 +20,40 @@ from pydantic import BaseModel, Field, model_validator
 
 class DisclosurePolicy(BaseModel):
     default: str = "public"
-    sensitive_info_allowed: bool = True
-    risk_control: str = "いつでも無効化できる・上限を設定できる運用でリスク制御"
+    sensitive_info_allowed: bool = False
+    risk_control: str = "APIキー/トークン/支払い情報/個人情報などの機微情報は公開しない"
+
+
+class CreatorScorePolicy(BaseModel):
+    """Creatorスコア運用ポリシー（当面の北極星指標）."""
+
+    enabled: bool = True
+    priority: str = "面白さ最優先"
+    axis_max_score: int = 25
+    total_max_score: int = 100
+    axes: dict[str, str] = Field(default_factory=lambda: {
+        "面白さ": (
+            "単純に面白い/興味を持てるか。人の野心や知的欲求を満たせるか。"
+            "お金が稼げる/コストがかかる等はこの軸では考慮しない。"
+        ),
+        "コスト効率": (
+            "面白さがあっても、コストがかかりすぎる/かかりそうなら減点。"
+            "より安い代替手段・小さく試す方法があるか。"
+        ),
+        "現実性": (
+            "現実世界で打ち上げる上で致命的な懸念がないか。"
+            "法/規約/技術/運用/セキュリティ/信頼面のリスクを踏まえる。"
+        ),
+        "進化性": (
+            "失敗しても会社にナレッジや有効データが残るか。"
+            "過程が再利用可能で、次の施策の質を上げるか。"
+        ),
+    })
+    creator_reply_format: str = (
+        "面白さ: x/25, コスト効率: y/25, 現実性: z/25, 進化性: w/25\n"
+        "コメント: （自由記述）\n"
+        "指示: 継続/ピボット/停止 + 次にやること1つ"
+    )
 
 
 class CreatorIntervention(BaseModel):
@@ -54,11 +86,12 @@ class ConstitutionModel(BaseModel):
     """会社憲法のYAMLスキーマに対応するモデル (Req 1.1, 1.4)."""
 
     version: int = 1
-    purpose: str = "研究開発中心のAI組織"
+    purpose: str = "有名で面白い存在になり、収益化を目指すAI会社"
     disclosure_policy: DisclosurePolicy = Field(default_factory=DisclosurePolicy)
     creator_intervention: CreatorIntervention = Field(default_factory=CreatorIntervention)
     budget: Budget = Field(default_factory=Budget)
     work_principles: WorkPrinciples = Field(default_factory=WorkPrinciples)
+    creator_score_policy: CreatorScorePolicy = Field(default_factory=CreatorScorePolicy)
     amendment: Amendment = Field(default_factory=Amendment)
 
 
@@ -184,6 +217,9 @@ class TaskEntry(BaseModel):
     result: Optional[str] = None
     error: Optional[str] = None
     agent_id: str = "ceo"
+    depends_on: list[str] = Field(default_factory=list)
+    quality_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    quality_notes: Optional[str] = None
 
 
 # --- Agent Registry (Req 4.1) ---
@@ -227,3 +263,32 @@ class ResearchNote(BaseModel):
     published_at: Optional[datetime] = None
     retrieved_at: datetime
 
+
+# --- Creator Review (KPI loop) ---
+
+class CreatorReview(BaseModel):
+    """Creatorによるスコアリング結果（0-100）."""
+
+    timestamp: datetime
+    user_id: Optional[str] = None
+    score_total_100: int = Field(ge=0, le=100)
+    score_interestingness_25: Optional[int] = Field(default=None, ge=0, le=25)
+    score_cost_efficiency_25: Optional[int] = Field(default=None, ge=0, le=25)
+    score_realism_25: Optional[int] = Field(default=None, ge=0, le=25)
+    score_evolvability_25: Optional[int] = Field(default=None, ge=0, le=25)
+    comment: str = ""
+    raw_text: str = ""
+
+
+# --- Consultation Queue ---
+
+class ConsultationEntry(BaseModel):
+    """Creatorへの相談事項（未解決のものを保持する）."""
+
+    consultation_id: str
+    created_at: datetime
+    status: Literal["pending", "resolved"] = "pending"
+    content: str
+    resolved_at: Optional[datetime] = None
+    resolution: Optional[str] = None
+    related_task_id: Optional[str] = None

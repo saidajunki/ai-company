@@ -23,7 +23,7 @@ from typing import Literal
 class Action:
     """LLM応答から抽出されたアクション."""
 
-    action_type: Literal["shell_command", "reply", "done", "research", "publish"]
+    action_type: Literal["shell_command", "reply", "done", "research", "publish", "consult", "delegate"]
     content: str
 
 
@@ -31,12 +31,14 @@ class Action:
 # Tag → action_type mapping
 # ---------------------------------------------------------------------------
 
-_TAG_TO_ACTION: dict[str, Literal["shell_command", "reply", "done", "research", "publish"]] = {
+_TAG_TO_ACTION: dict[str, Literal["shell_command", "reply", "done", "research", "publish", "consult", "delegate"]] = {
     "shell": "shell_command",
     "reply": "reply",
     "done": "done",
     "research": "research",
     "publish": "publish",
+    "consult": "consult",
+    "delegate": "delegate",
 }
 
 _ACTION_TO_TAG: dict[str, str] = {v: k for k, v in _TAG_TO_ACTION.items()}
@@ -44,7 +46,7 @@ _ACTION_TO_TAG: dict[str, str] = {v: k for k, v in _TAG_TO_ACTION.items()}
 # Regex that matches any of the supported tags and captures inner content.
 # re.DOTALL so '.' matches newlines inside the tag body.
 _TAG_PATTERN = re.compile(
-    r"<(reply|shell|done|research|publish)>\s*(.*?)\s*</\1>",
+    r"<(reply|shell|done|research|publish|consult|delegate)>\s*(.*?)\s*</\1>",
     re.DOTALL,
 )
 
