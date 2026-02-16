@@ -12,6 +12,9 @@ REQUIRED_SECTIONS = [
     "### Blockers",
     "### Cost(60m)",
     "### Approvals",
+    "### 自律タスク",
+    "### エージェント",
+    "### サービス",
 ]
 
 
@@ -106,3 +109,45 @@ class TestFormatReportSections:
         assert "コード修正" in report
         assert "link1" in report
         assert "デプロイ" in report
+
+
+    def test_running_tasks_rendered(self):
+        data = _make_report_data(running_tasks=["調査タスク", "ビルドタスク"])
+        report = format_report(data)
+        assert "- 調査タスク" in report
+        assert "- ビルドタスク" in report
+
+    def test_empty_running_tasks_shows_none(self):
+        data = _make_report_data(running_tasks=[])
+        report = format_report(data)
+        task_start = report.index("### 自律タスク")
+        agent_start = report.index("### エージェント")
+        task_section = report[task_start:agent_start]
+        assert "なし" in task_section
+
+    def test_active_agents_rendered(self):
+        data = _make_report_data(active_agents=["CEO_AI", "研究員AI"])
+        report = format_report(data)
+        assert "- CEO_AI" in report
+        assert "- 研究員AI" in report
+
+    def test_empty_active_agents_shows_none(self):
+        data = _make_report_data(active_agents=[])
+        report = format_report(data)
+        agent_start = report.index("### エージェント")
+        service_start = report.index("### サービス")
+        agent_section = report[agent_start:service_start]
+        assert "なし" in agent_section
+
+    def test_recent_services_rendered(self):
+        data = _make_report_data(recent_services=["OSSツール", "データ分析API"])
+        report = format_report(data)
+        assert "- OSSツール" in report
+        assert "- データ分析API" in report
+
+    def test_empty_recent_services_shows_none(self):
+        data = _make_report_data(recent_services=[])
+        report = format_report(data)
+        service_start = report.index("### サービス")
+        service_section = report[service_start:]
+        assert "なし" in service_section

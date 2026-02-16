@@ -32,6 +32,9 @@ class ReportData:
     blockers: list[str] = field(default_factory=list)
     cost: CostSummary = field(default_factory=lambda: CostSummary(0.0, 10.0))
     approvals: list[str] = field(default_factory=list)
+    running_tasks: list[str] = field(default_factory=list)
+    active_agents: list[str] = field(default_factory=list)
+    recent_services: list[str] = field(default_factory=list)
 
 
 def format_report(data: ReportData) -> str:
@@ -45,6 +48,24 @@ def format_report(data: ReportData) -> str:
 
     approval_lines = (
         "\n".join(f"- {a}" for a in data.approvals) if data.approvals else "- なし"
+    )
+
+    task_lines = (
+        "\n".join(f"- {t}" for t in data.running_tasks)
+        if data.running_tasks
+        else "- なし"
+    )
+
+    agent_lines = (
+        "\n".join(f"- {a}" for a in data.active_agents)
+        if data.active_agents
+        else "- なし"
+    )
+
+    service_lines = (
+        "\n".join(f"- {s}" for s in data.recent_services)
+        if data.recent_services
+        else "- なし"
     )
 
     return f"""\
@@ -71,4 +92,13 @@ def format_report(data: ReportData) -> str:
 - 配分予定: {data.cost.allocation_plan}
 
 ### Approvals
-{approval_lines}"""
+{approval_lines}
+
+### 自律タスク
+{task_lines}
+
+### エージェント
+{agent_lines}
+
+### サービス
+{service_lines}"""

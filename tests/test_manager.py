@@ -401,3 +401,97 @@ class TestRemoveWip:
         assert mgr.add_wip("d") is True
         assert "d" in mgr.state.wip
         assert "b" not in mgr.state.wip
+
+
+# ---------------------------------------------------------------------------
+# Conversation memory integration (Task 2.5)
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock
+from llm_client import LLMResponse
+from models import ConversationEntry
+
+
+def _make_manager_with_llm(tmp_path: Path) -> Manager:
+    """Create a Manager with a mocked LLM client that returns a simple response."""
+    init_company_directory(tmp_path, CID)
+    mgr = Manager(tmp_path, CID)
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = LLMResponse(
+        content="<reply>テスト応答</reply>",
+        input_tokens=100,
+        output_tokens=50,
+        model="test-model",
+        finish_reason="stop",
+    )
+    mgr.llm_client = mock_llm
+    mgr.slack = MagicMock()
+    return mgr
+
+
+class TestProcessMessageConversationMemory:
+    def test_saves_user_message(self, tmp_path: Path):
+        mgr = _make_manager_with_llm(tmp_path)
+        mgr.process_message("こんにちは", user_id="U123")
+
+        entries = mgr.conversation_memory.recent()
+        user_entries = [e for e in entries if e.role == "user"]
+        assert len(user_entries) == 1
+        assert user_entries[0].content == "こんにちは"
+        assert user_entries[0].user_id == "U123"
+
+    def test_saves_assistant_response(self, tmp_path: Path):
+        mgr = _make_manager_with_llm(tmp_path)
+        mgr.process_message("テスト", user_id="U123")
+
+        entries = mgr.conversation_memory.recent()
+        assistant_entries = [e for e in entries if e.role == "assistant"]
+        assert len(assistant_entries) == 1
+        assert "<reply>テスト応答</reply>" in assistant_entries[0].content
+
+    def test_saves_both_user_and_assistant(self, tmp_path: Path):
+        mgr = _make_manager_with_llm(tmp_path)
+        mgr.process_message("質問です", user_id="U456")
+
+        entries = mgr.conversation_memory.recent()
+        assert len(entries) == 2
+        assert entries[0].role == "user"
+        assert entries[1].role == "assistant"
+
+    def test_passes_conversation_history_to_prompt(self, tmp_path: Path):
+        mgr = _make_manager_with_llm(tmp_path)
+
+        # First message populates history
+        mgr.process_message("最初のメッセージ", user_id="U123")
+
+        # Second message should include history in the system prompt
+        mgr.process_message("二番目のメッセージ", user_id="U123")
+
+        # The LLM was called twice; check the second call's system prompt
+        calls = mgr.llm_client.chat.call_args_list
+        assert len(calls) == 2
+        second_call_messages = calls[1][0][0]
+        system_prompt = second_call_messages[0]["content"]
+        # History from first message should be in the prompt
+        assert "最初のメッセージ" in system_prompt
+
+    def test_conversation_memory_failure_does_not_break_processing(self, tmp_path: Path):
+        mgr = _make_manager_with_llm(tmp_path)
+
+        # Break the conversation memory append
+        mgr.conversation_memory.append = MagicMock(side_effect=OSError("disk full"))
+
+        # Should still process the message without raising
+        mgr.process_message("テスト", user_id="U123")
+
+        # LLM was still called
+        assert mgr.llm_client.chat.called
+
+    def test_task_id_set_on_entries(self, tmp_path: Path):
+        mgr = _make_manager_with_llm(tmp_path)
+        mgr.process_message("テスト", user_id="U123")
+
+        entries = mgr.conversation_memory.recent()
+        for entry in entries:
+            assert entry.task_id is not None
+            assert entry.task_id.startswith("msg-")

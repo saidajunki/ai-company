@@ -8,7 +8,7 @@ Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 7.3
 
 from __future__ import annotations
 
-from models import ConstitutionModel, DecisionLogEntry
+from models import ConstitutionModel, ConversationEntry, DecisionLogEntry
 
 
 def build_system_prompt(
@@ -17,6 +17,8 @@ def build_system_prompt(
     recent_decisions: list[DecisionLogEntry],
     budget_spent: float,
     budget_limit: float,
+    conversation_history: list[ConversationEntry] | None = None,
+    vision_text: str | None = None,
 ) -> str:
     """コンテキスト情報からシステムプロンプトを構築する."""
     sections: list[str] = [
@@ -26,6 +28,9 @@ def build_system_prompt(
     # --- 会社憲法 ---
     sections.append(_build_constitution_section(constitution))
 
+    # --- ビジョン・事業方針 ---
+    sections.append(_build_vision_section(vision_text))
+
     # --- 現在のWIP ---
     sections.append(_build_wip_section(wip))
 
@@ -34,6 +39,9 @@ def build_system_prompt(
 
     # --- 予算状況 ---
     sections.append(_build_budget_section(budget_spent, budget_limit))
+
+    # --- 会話履歴 ---
+    sections.append(_build_conversation_section(conversation_history))
 
     # --- 応答フォーマット ---
     sections.append(_build_format_section())
@@ -55,6 +63,15 @@ def _build_constitution_section(constitution: ConstitutionModel | None) -> str:
             f"- 予算上限: ${constitution.budget.limit_usd}/{constitution.budget.window_minutes}分"
         )
         lines.append(f"- WIP制限: {constitution.work_principles.wip_limit}件")
+    return "\n".join(lines)
+
+
+def _build_vision_section(vision_text: str | None) -> str:
+    lines = ["## ビジョン・事業方針"]
+    if not vision_text:
+        lines.append("ビジョン未設定")
+    else:
+        lines.append(vision_text)
     return "\n".join(lines)
 
 
@@ -105,3 +122,16 @@ def _build_format_section() -> str:
         "",
         "タグは複数組み合わせ可能です。タグなしの場合は全体がreplyとして扱われます。",
     ])
+
+def _build_conversation_section(
+    conversation_history: list[ConversationEntry] | None,
+) -> str:
+    lines = ["## 会話履歴"]
+    if not conversation_history:
+        lines.append("会話履歴なし")
+    else:
+        for entry in conversation_history:
+            ts = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            lines.append(f"- [{entry.role}] {ts}: {entry.content}")
+    return "\n".join(lines)
+

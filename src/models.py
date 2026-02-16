@@ -156,3 +156,59 @@ class PricingCache(BaseModel):
 
     retrieved_at: datetime
     models: dict[str, ModelPricing] = Field(default_factory=dict)
+
+
+# --- Conversation Memory (Req 1.1) ---
+
+class ConversationEntry(BaseModel):
+    """会話履歴エントリ."""
+
+    timestamp: datetime
+    role: Literal["user", "assistant", "system"]
+    content: str
+    user_id: Optional[str] = None
+    task_id: Optional[str] = None
+
+
+# --- Task Queue (Req 3.1) ---
+
+class TaskEntry(BaseModel):
+    """自律タスクエントリ."""
+
+    task_id: str
+    description: str
+    priority: int = Field(default=3, ge=1, le=5)
+    status: Literal["pending", "running", "completed", "failed"]
+    created_at: datetime
+    updated_at: datetime
+    result: Optional[str] = None
+    error: Optional[str] = None
+    agent_id: str = "ceo"
+
+
+# --- Agent Registry (Req 4.1) ---
+
+class AgentEntry(BaseModel):
+    """エージェントレジストリエントリ."""
+
+    agent_id: str
+    name: str
+    role: str
+    model: str
+    budget_limit_usd: float = Field(ge=0)
+    status: Literal["active", "inactive"] = "active"
+    created_at: datetime
+    updated_at: datetime
+
+
+# --- Service Registry (Req 5.1) ---
+
+class ServiceEntry(BaseModel):
+    """サービスレジストリエントリ."""
+
+    name: str
+    description: str
+    status: Literal["active", "archived"] = "active"
+    created_at: datetime
+    updated_at: datetime
+    agent_id: str

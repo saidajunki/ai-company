@@ -16,8 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from agent_registry import AgentRegistry
+from autonomous_loop import AutonomousLoop
 from constitution_store import constitution_save
 from context_builder import build_system_prompt
+from conversation_memory import ConversationMemory
 from cost_aggregator import compute_window_cost, is_budget_exceeded
 from heartbeat import update_heartbeat, update_heartbeat_on_report
 from llm_client import LLMClient, LLMError, LLMResponse
@@ -28,6 +31,7 @@ from manager_state import (
 )
 from models import (
     ConstitutionModel,
+    ConversationEntry,
     HeartbeatState,
     LedgerEvent,
 )
@@ -39,7 +43,11 @@ from pricing import (
 from recovery import determine_recovery_action, RecoveryAction
 from report_formatter import CostSummary, ReportData, format_report
 from response_parser import Action, parse_response
+from service_registry import ServiceRegistry
 from shell_executor import ShellResult, execute_shell
+from sub_agent_runner import SubAgentRunner
+from task_queue import TaskQueue
+from vision_loader import VisionLoader
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +142,17 @@ class Manager:
         self.llm_client: LLMClient | None = None
         self.slack: "SlackBot | None" = None  # noqa: F821 — forward ref
 
+        # Conversation memory (Req 1.1, 1.5)
+        self.conversation_memory = ConversationMemory(base_dir, company_id)
+
+        # Autonomous growth components
+        self.vision_loader = VisionLoader(base_dir, company_id)
+        self.task_queue = TaskQueue(base_dir, company_id)
+        self.agent_registry = AgentRegistry(base_dir, company_id)
+        self.service_registry = ServiceRegistry(base_dir, company_id)
+        self.sub_agent_runner = SubAgentRunner(self)
+        self.autonomous_loop = AutonomousLoop(self)
+
     # ------------------------------------------------------------------
     # Startup (Req 7.1, 7.6)
     # ------------------------------------------------------------------
@@ -157,6 +176,13 @@ class Manager:
             current_wip=self.state.wip,
             pid=self.pid,
         )
+
+        # Register CEO agent (Req 4.2)
+        try:
+            model = self.llm_client.model if self.llm_client else "unknown"
+            self.agent_registry.ensure_ceo(model)
+        except Exception:
+            logger.warning("Failed to ensure CEO agent registration", exc_info=True)
 
         # Determine what to do first after wakeup
         action, description = determine_recovery_action(self.state)
@@ -251,11 +277,44 @@ class Manager:
             remaining_usd=remaining,
         )
 
+        # Autonomous growth data (Req 7.1, 7.2, 7.3)
+        running_tasks: list[str] = []
+        active_agents: list[str] = []
+        recent_services: list[str] = []
+
+        try:
+            if hasattr(self, "task_queue") and self.task_queue:
+                running_tasks = [
+                    t.description for t in self.task_queue.list_by_status("running")
+                ]
+        except Exception:
+            logger.warning("Failed to get running tasks for report", exc_info=True)
+
+        try:
+            if hasattr(self, "agent_registry") and self.agent_registry:
+                active_agents = [
+                    f"{a.name} ({a.role})" for a in self.agent_registry.list_active()
+                ]
+        except Exception:
+            logger.warning("Failed to get active agents for report", exc_info=True)
+
+        try:
+            if hasattr(self, "service_registry") and self.service_registry:
+                recent_services = [
+                    f"{s.name}: {s.description}"
+                    for s in self.service_registry.list_all()
+                ]
+        except Exception:
+            logger.warning("Failed to get services for report", exc_info=True)
+
         data = ReportData(
             timestamp=now,
             company_id=self.company_id,
             wip=list(self.state.wip),
             cost=cost_summary,
+            running_tasks=running_tasks,
+            active_agents=active_agents,
+            recent_services=recent_services,
         )
 
         report = format_report(data)
@@ -337,6 +396,19 @@ class Manager:
 
             # 2. コンテキスト構築
             now = datetime.now(timezone.utc)
+
+            # Save user message to conversation memory (Req 1.1)
+            try:
+                self.conversation_memory.append(ConversationEntry(
+                    timestamp=now,
+                    role="user",
+                    content=text,
+                    user_id=user_id,
+                    task_id=task_id,
+                ))
+            except Exception:
+                logger.warning("Failed to save user message to conversation memory", exc_info=True)
+
             spent = compute_window_cost(self.state.ledger_events, now)
             limit = DEFAULT_BUDGET_LIMIT_USD
             if self.state.constitution and self.state.constitution.budget:
@@ -344,12 +416,28 @@ class Manager:
 
             recent_decisions = self.state.decision_log[-5:]
 
+            # Load recent conversation history (Req 1.2)
+            try:
+                conversation_history = self.conversation_memory.recent()
+            except Exception:
+                logger.warning("Failed to load conversation history", exc_info=True)
+                conversation_history = None
+
+            # Load vision text (Req 2.1)
+            try:
+                vision_text = self.vision_loader.load()
+            except Exception:
+                logger.warning("Failed to load vision", exc_info=True)
+                vision_text = None
+
             system_prompt = build_system_prompt(
                 constitution=self.state.constitution,
                 wip=self.state.wip,
                 recent_decisions=recent_decisions,
                 budget_spent=spent,
                 budget_limit=limit,
+                conversation_history=conversation_history,
+                vision_text=vision_text,
             )
 
             conversation: list[dict[str, str]] = [
@@ -383,6 +471,17 @@ class Manager:
             # 5. 応答パース
             actions = parse_response(llm_result.content)
             conversation.append({"role": "assistant", "content": llm_result.content})
+
+            # Save assistant response to conversation memory (Req 1.5)
+            try:
+                self.conversation_memory.append(ConversationEntry(
+                    timestamp=datetime.now(timezone.utc),
+                    role="assistant",
+                    content=llm_result.content,
+                    task_id=task_id,
+                ))
+            except Exception:
+                logger.warning("Failed to save assistant response to conversation memory", exc_info=True)
 
             # 6. アクション実行ループ
             self._execute_action_loop(actions, conversation, task_id)

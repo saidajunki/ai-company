@@ -196,6 +196,13 @@ def main() -> None:
             if mgr.check_budget():
                 log.warning("Budget exceeded – pausing LLM/API calls")
 
+            # Autonomous task execution (Req 3.2)
+            try:
+                if hasattr(mgr, 'autonomous_loop') and mgr.autonomous_loop:
+                    mgr.autonomous_loop.tick()
+            except Exception:
+                log.exception("Error in autonomous loop tick")
+
             # Send 10-minute report (Req 3.2)
             elapsed = time.monotonic() - last_report_at
             if elapsed >= REPORT_INTERVAL and slack:

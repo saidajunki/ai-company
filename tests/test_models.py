@@ -271,3 +271,288 @@ class TestPricingCache:
             },
         )
         assert len(p.models) == 2
+
+
+# --- New models for autonomous growth ---
+
+from models import AgentEntry, ConversationEntry, ServiceEntry, TaskEntry
+
+
+# --- ConversationEntry ---
+
+class TestConversationEntry:
+    def test_valid_user_message(self):
+        e = ConversationEntry(
+            timestamp=NOW,
+            role="user",
+            content="こんにちは",
+            user_id="U123",
+        )
+        assert e.role == "user"
+        assert e.content == "こんにちは"
+        assert e.user_id == "U123"
+        assert e.task_id is None
+
+    def test_valid_assistant_message(self):
+        e = ConversationEntry(
+            timestamp=NOW,
+            role="assistant",
+            content="了解しました",
+        )
+        assert e.role == "assistant"
+        assert e.user_id is None
+
+    def test_valid_system_message(self):
+        e = ConversationEntry(
+            timestamp=NOW,
+            role="system",
+            content="System prompt",
+            task_id="task-1",
+        )
+        assert e.role == "system"
+        assert e.task_id == "task-1"
+
+    def test_invalid_role(self):
+        with pytest.raises(ValidationError):
+            ConversationEntry(
+                timestamp=NOW,
+                role="unknown",
+                content="test",
+            )
+
+    def test_missing_content(self):
+        with pytest.raises(ValidationError):
+            ConversationEntry(timestamp=NOW, role="user")
+
+    def test_json_round_trip(self):
+        e = ConversationEntry(
+            timestamp=NOW,
+            role="user",
+            content="テスト",
+            user_id="U1",
+            task_id="T1",
+        )
+        restored = ConversationEntry.model_validate_json(e.model_dump_json())
+        assert restored == e
+
+
+# --- TaskEntry ---
+
+class TestTaskEntry:
+    def test_valid_task(self):
+        t = TaskEntry(
+            task_id="t-1",
+            description="テストタスク",
+            priority=1,
+            status="pending",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        assert t.task_id == "t-1"
+        assert t.priority == 1
+        assert t.agent_id == "ceo"
+
+    def test_default_priority(self):
+        t = TaskEntry(
+            task_id="t-2",
+            description="デフォルト優先度",
+            status="pending",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        assert t.priority == 3
+
+    def test_priority_bounds(self):
+        with pytest.raises(ValidationError):
+            TaskEntry(
+                task_id="t-3",
+                description="invalid",
+                priority=0,
+                status="pending",
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        with pytest.raises(ValidationError):
+            TaskEntry(
+                task_id="t-4",
+                description="invalid",
+                priority=6,
+                status="pending",
+                created_at=NOW,
+                updated_at=NOW,
+            )
+
+    def test_invalid_status(self):
+        with pytest.raises(ValidationError):
+            TaskEntry(
+                task_id="t-5",
+                description="bad status",
+                status="cancelled",
+                created_at=NOW,
+                updated_at=NOW,
+            )
+
+    def test_with_result_and_error(self):
+        t = TaskEntry(
+            task_id="t-6",
+            description="完了タスク",
+            status="completed",
+            created_at=NOW,
+            updated_at=NOW,
+            result="成功",
+            error=None,
+            agent_id="sub-1",
+        )
+        assert t.result == "成功"
+        assert t.agent_id == "sub-1"
+
+    def test_json_round_trip(self):
+        t = TaskEntry(
+            task_id="t-7",
+            description="往復テスト",
+            priority=2,
+            status="running",
+            created_at=NOW,
+            updated_at=NOW,
+            result="partial",
+            agent_id="sub-2",
+        )
+        restored = TaskEntry.model_validate_json(t.model_dump_json())
+        assert restored == t
+
+
+# --- AgentEntry ---
+
+class TestAgentEntry:
+    def test_valid_agent(self):
+        a = AgentEntry(
+            agent_id="ceo",
+            name="CEO AI",
+            role="ceo",
+            model="gpt-4",
+            budget_limit_usd=10.0,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        assert a.agent_id == "ceo"
+        assert a.status == "active"
+
+    def test_inactive_agent(self):
+        a = AgentEntry(
+            agent_id="sub-1",
+            name="Worker",
+            role="researcher",
+            model="gpt-3.5",
+            budget_limit_usd=1.0,
+            status="inactive",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        assert a.status == "inactive"
+
+    def test_negative_budget_rejected(self):
+        with pytest.raises(ValidationError):
+            AgentEntry(
+                agent_id="bad",
+                name="Bad",
+                role="test",
+                model="gpt-4",
+                budget_limit_usd=-1.0,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+
+    def test_zero_budget_allowed(self):
+        a = AgentEntry(
+            agent_id="free",
+            name="Free",
+            role="test",
+            model="gpt-4",
+            budget_limit_usd=0.0,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        assert a.budget_limit_usd == 0.0
+
+    def test_invalid_status(self):
+        with pytest.raises(ValidationError):
+            AgentEntry(
+                agent_id="x",
+                name="X",
+                role="test",
+                model="gpt-4",
+                budget_limit_usd=1.0,
+                status="suspended",
+                created_at=NOW,
+                updated_at=NOW,
+            )
+
+    def test_json_round_trip(self):
+        a = AgentEntry(
+            agent_id="ceo",
+            name="CEO AI",
+            role="ceo",
+            model="gpt-4",
+            budget_limit_usd=10.0,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        restored = AgentEntry.model_validate_json(a.model_dump_json())
+        assert restored == a
+
+
+# --- ServiceEntry ---
+
+class TestServiceEntry:
+    def test_valid_service(self):
+        s = ServiceEntry(
+            name="my-oss",
+            description="OSSプロジェクト",
+            created_at=NOW,
+            updated_at=NOW,
+            agent_id="ceo",
+        )
+        assert s.name == "my-oss"
+        assert s.status == "active"
+
+    def test_archived_service(self):
+        s = ServiceEntry(
+            name="old-tool",
+            description="古いツール",
+            status="archived",
+            created_at=NOW,
+            updated_at=NOW,
+            agent_id="sub-1",
+        )
+        assert s.status == "archived"
+
+    def test_invalid_status(self):
+        with pytest.raises(ValidationError):
+            ServiceEntry(
+                name="bad",
+                description="bad",
+                status="deleted",
+                created_at=NOW,
+                updated_at=NOW,
+                agent_id="ceo",
+            )
+
+    def test_missing_agent_id(self):
+        with pytest.raises(ValidationError):
+            ServiceEntry(
+                name="no-agent",
+                description="missing agent",
+                created_at=NOW,
+                updated_at=NOW,
+            )
+
+    def test_json_round_trip(self):
+        s = ServiceEntry(
+            name="test-svc",
+            description="テストサービス",
+            created_at=NOW,
+            updated_at=NOW,
+            agent_id="ceo",
+        )
+        restored = ServiceEntry.model_validate_json(s.model_dump_json())
+        assert restored == s
