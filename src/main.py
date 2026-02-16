@@ -36,6 +36,8 @@ REPORT_INTERVAL = int(os.environ.get("REPORT_INTERVAL", "600"))  # 10 min
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-3-flash")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 _shutdown = False
 
@@ -52,6 +54,7 @@ def main() -> None:
 
     log.info("=== AI Company Manager starting ===")
     log.info("Company: %s | Base: %s | Heartbeat interval: %ds", COMPANY_ID, BASE_DIR, HEARTBEAT_INTERVAL)
+    log.info("LLM Model: %s", OPENROUTER_MODEL)
 
     # Initialize directory structure and default constitution
     init_company_directory(BASE_DIR, COMPANY_ID)

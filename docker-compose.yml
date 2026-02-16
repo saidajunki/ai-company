@@ -12,6 +12,8 @@ services:
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN}
       - SLACK_CHANNEL_ID=C0AF21AFC14
+      - OPENROUTER_MODEL=google/gemini-3-flash
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
     volumes:
       - ai-company-data:/app/data
     networks:
