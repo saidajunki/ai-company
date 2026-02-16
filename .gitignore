@@ -33,3 +33,4 @@ htmlcov/
 
 # Environment (secrets)
 .env
+.github/
