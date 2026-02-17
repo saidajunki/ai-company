@@ -571,7 +571,7 @@ class TestRetryFailedTasks:
         """max_retries到達タスクはCreatorにエスカレーションされる."""
         mgr = _make_manager(tmp_path)
         mock_consult = MagicMock()
-        mock_consult.add.return_value = MagicMock(consultation_id="esc12345")
+        mock_consult.ensure_pending.return_value = (MagicMock(consultation_id="esc12345"), True)
         mgr.consultation_store = mock_consult
         loop = AutonomousLoop(mgr)
 
@@ -583,9 +583,9 @@ class TestRetryFailedTasks:
 
         loop._retry_failed_tasks()
 
-        # consultation_store.add should have been called
-        mock_consult.add.assert_called_once()
-        call_args = mock_consult.add.call_args
+        # consultation_store.ensure_pending should have been called
+        mock_consult.ensure_pending.assert_called_once()
+        call_args = mock_consult.ensure_pending.call_args
         assert task.task_id in call_args[0][0]
 
         # エスカレーション済みマーカーが付いていること
@@ -596,7 +596,7 @@ class TestRetryFailedTasks:
         """エスカレーション済みタスクは再度エスカレーションされない."""
         mgr = _make_manager(tmp_path)
         mock_consult = MagicMock()
-        mock_consult.add.return_value = MagicMock(consultation_id="esc12345")
+        mock_consult.ensure_pending.return_value = (MagicMock(consultation_id="esc12345"), True)
         mgr.consultation_store = mock_consult
         loop = AutonomousLoop(mgr)
 
@@ -608,11 +608,11 @@ class TestRetryFailedTasks:
 
         # 1回目のエスカレーション
         loop._retry_failed_tasks()
-        assert mock_consult.add.call_count == 1
+        assert mock_consult.ensure_pending.call_count == 1
 
         # 2回目のtickではエスカレーションされない
         loop._retry_failed_tasks()
-        assert mock_consult.add.call_count == 1  # 変わらない
+        assert mock_consult.ensure_pending.call_count == 1  # 変わらない
 
     def test_tick_calls_retry_before_pick(self, tmp_path: Path):
         """tick()が_pick_taskの前に_retry_failed_tasksを呼ぶ."""
