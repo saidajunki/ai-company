@@ -19,6 +19,8 @@ services:
       - CREATOR_SLACK_USER_ID=${CREATOR_SLACK_USER_ID:-}
     volumes:
       - ai-company-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/apps:/opt/apps
     networks:
       - apps-network
 

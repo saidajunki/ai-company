@@ -3,7 +3,7 @@ FROM ubuntu:latest
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
-# Install Python 3.12 + common system tools
+# Install Python 3.12 + common system tools + Docker CLI
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
@@ -17,6 +17,13 @@ RUN apt-get update && apt-get install -y \
     dnsutils \
     net-tools \
     ca-certificates \
+    gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y docker-ce-cli docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project files
@@ -33,7 +40,8 @@ RUN pip install --no-cache-dir --break-system-packages ".[dev]"
 # Create non-root user and data directory with correct ownership
 # Ubuntu base image has a default 'ubuntu' user at UID 1000, remove it first
 RUN userdel -r ubuntu 2>/dev/null || true \
-    && useradd -m -u 1000 company \
+    && groupadd -g 987 docker \
+    && useradd -m -u 1000 -G docker company \
     && mkdir -p /etc/sudoers.d \
     && echo "company ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/company \
     && chmod 0440 /etc/sudoers.d/company \
