@@ -35,3 +35,16 @@ jobs:
             systemctl restart ai-company
             sleep 3
             systemctl is-active ai-company
+            # Dashboard (docker compose)
+            if [ -d /opt/apps/ai-company/dashboard ]; then
+              cd /opt/apps/ai-company/dashboard
+              if docker compose version >/dev/null 2>&1; then
+                docker compose up -d --build
+              elif command -v docker-compose >/dev/null 2>&1; then
+                docker-compose up -d --build
+              else
+                echo "⚠ docker compose not found; skipping dashboard deploy"
+              fi
+            else
+              echo "⚠ dashboard dir not found; skipping dashboard deploy"
+            fi
