@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from artifact_verifier import ArtifactVerifier
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WIP_LIMIT = 3
 MAX_TASK_TURNS = 50
+# runningタスクがこの秒数以上updated_atから経過したらstuckとみなす
+STUCK_TASK_TIMEOUT_SECONDS = 1800  # 30分
 
 
 class AutonomousLoop:
@@ -38,14 +41,18 @@ class AutonomousLoop:
     def tick(self) -> None:
         """1サイクル分の自律実行を行う.
 
-        1. WIPに空きがあるか確認
-        2. 予算に余裕があるか確認
-        3. pendingタスクを選択（なければLLMに提案を依頼）
-        4. タスクを実行
-        5. 結果を報告
+        1. stuckしたrunningタスクを検出してfailedにする
+        2. WIPに空きがあるか確認
+        3. 予算に余裕があるか確認
+        4. pendingタスクを選択（なければLLMに提案を依頼）
+        5. タスクを実行
+        6. 結果を報告
         """
         try:
-            # 0. Retry failed tasks
+            # 0a. Reap stuck running tasks
+            self._reap_stuck_tasks()
+
+            # 0b. Retry failed tasks
             self._retry_failed_tasks()
 
             # 1. WIP check
@@ -576,6 +583,36 @@ class AutonomousLoop:
             self.manager._slack_send(message)
         except Exception:
             logger.warning("Failed to send report: %s", message, exc_info=True)
+
+    def _reap_stuck_tasks(self) -> None:
+        """updated_atから一定時間経過したrunningタスクをfailedにする."""
+        now = datetime.now(timezone.utc)
+        running = self.manager.task_queue.list_by_status("running")
+        for task in running:
+            updated = task.updated_at
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            elapsed = (now - updated).total_seconds()
+            if elapsed >= STUCK_TASK_TIMEOUT_SECONDS:
+                logger.warning(
+                    "Reaping stuck task %s (running for %ds): %s",
+                    task.task_id,
+                    int(elapsed),
+                    task.description[:80],
+                )
+                try:
+                    self.manager.task_queue.update_status(
+                        task.task_id,
+                        "failed",
+                        error=f"タイムアウト({int(elapsed)}秒間進捗なし)",
+                    )
+                    self._check_parent_completion(task)
+                    self._report(
+                        f"⏰ タスクタイムアウト: {task.description[:60]}\n"
+                        f"({int(elapsed)}秒間進捗なし → failed)"
+                    )
+                except Exception:
+                    logger.exception("Failed to reap stuck task %s", task.task_id)
 
     def _retry_failed_tasks(self) -> None:
         """リトライ可能な失敗タスクをpendingに戻す."""

@@ -75,6 +75,23 @@ def main() -> None:
     if OPENROUTER_API_KEY:
         mgr.llm_client = LLMClient(api_key=OPENROUTER_API_KEY, model=OPENROUTER_MODEL)
         log.info("LLM client initialized (model: %s)", OPENROUTER_MODEL)
+        # Update CEO agent model (may have been registered as "unknown" during startup)
+        try:
+            ceo = mgr.agent_registry.get("ceo")
+            if ceo and ceo.model != OPENROUTER_MODEL:
+                mgr.agent_registry.update_status("ceo", ceo.status)
+                # Re-register with correct model
+                from datetime import datetime, timezone
+                from models import AgentEntry
+                from ndjson_store import ndjson_append
+                updated_ceo = ceo.model_copy(update={
+                    "model": OPENROUTER_MODEL,
+                    "updated_at": datetime.now(timezone.utc),
+                })
+                ndjson_append(mgr.agent_registry._path, updated_ceo)
+                log.info("CEO agent model updated: %s → %s", ceo.model, OPENROUTER_MODEL)
+        except Exception:
+            log.warning("Failed to update CEO agent model", exc_info=True)
     else:
         log.warning("OPENROUTER_API_KEY not set – LLM features disabled")
 
