@@ -102,14 +102,24 @@ def _cosine_sim(a: bytes, b: bytes) -> float:
 
 
 def _safe_fts_query(query: str) -> str:
-    """Best-effort sanitize for FTS5 query syntax."""
+    """Best-effort sanitize for FTS5 query syntax.
+
+    Each token is double-quoted to prevent FTS5 from interpreting words
+    (e.g. numbers like ``100`` or arbitrary words like ``Breakup``) as
+    column names, which would cause ``no such column`` errors.
+    """
     q = (query or "").strip()
     if not q:
         return ""
-    # Remove characters that are likely to be interpreted as FTS operators.
+    # Remove characters that break FTS5 syntax even inside quotes.
     q = re.sub(r'["`:\\^*()\[\]{}]', " ", q)
     q = re.sub(r"\s+", " ", q).strip()
-    return q
+    if not q:
+        return ""
+    # Quote each token so FTS5 treats them as literals, not column refs.
+    tokens = q.split()
+    quoted = " ".join(f'"{t}"' for t in tokens if t)
+    return quoted
 
 
 class MemoryIndex:

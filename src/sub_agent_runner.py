@@ -16,6 +16,7 @@ from uuid import uuid4
 from cost_aggregator import compute_window_cost
 from llm_client import LLMClient, LLMError
 from model_catalog import select_model_for_role
+from models import ResearchNote
 from response_parser import parse_response
 from shell_executor import execute_shell
 
