@@ -12,8 +12,12 @@ services:
       - ai-company_ai-company-data:/app/data:ro
     networks:
       - apps-network
-    ports:
-      - "8501:8000"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ai-company-dashboard.rule=Host(`status-ai-company.app.babl.tech`)"
+      - "traefik.http.routers.ai-company-dashboard.tls=true"
+      - "traefik.http.routers.ai-company-dashboard.tls.certresolver=letsencrypt"
+      - "traefik.http.services.ai-company-dashboard.loadbalancer.server.port=8000"
 
 volumes:
   ai-company_ai-company-data:
