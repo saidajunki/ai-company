@@ -50,6 +50,7 @@ def build_system_prompt(
     model_catalog_text: str | None = None,
     rolling_summary: str | None = None,
     recalled_memories: list[str] | None = None,
+    slack_thread_context: str | None = None,
 ) -> str:
     """コンテキスト情報からシステムプロンプトを構築する."""
     sections: list[str] = [
@@ -91,6 +92,9 @@ def build_system_prompt(
 
     # --- タスク履歴 ---
     sections.append(_build_task_history_section(task_history))
+
+    # --- Slackスレッド（コンテキスト） ---
+    sections.append(_build_slack_thread_section(slack_thread_context))
 
     # --- 会話履歴 ---
     sections.append(_build_conversation_section(conversation_history))
@@ -201,6 +205,14 @@ def _build_memory_recall_section(recalled_memories: list[str] | None) -> str:
         if not s:
             continue
         lines.append(s if s.startswith("-") else f"- {s}")
+    return "\n".join(lines)
+
+def _build_slack_thread_section(slack_thread_context: str | None) -> str:
+    lines = ["## Slackスレッド（コンテキスト）"]
+    if not slack_thread_context or not slack_thread_context.strip():
+        lines.append("スレッドコンテキストなし")
+        return "\n".join(lines)
+    lines.append(slack_thread_context.strip())
     return "\n".join(lines)
 
 

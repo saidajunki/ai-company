@@ -22,7 +22,7 @@ class TaskQueue:
     def __init__(self, base_dir: Path, company_id: str) -> None:
         self._path = base_dir / "companies" / company_id / "state" / "tasks.ndjson"
 
-    def add(self, description: str, priority: int = 3, agent_id: str = "ceo") -> TaskEntry:
+    def add(self, description: str, priority: int = 3, agent_id: str = "ceo", source: str = "autonomous") -> TaskEntry:
         """新しいタスクを追加する. Returns the created TaskEntry."""
         now = datetime.now(timezone.utc)
         entry = TaskEntry(
@@ -33,6 +33,7 @@ class TaskQueue:
             created_at=now,
             updated_at=now,
             agent_id=agent_id,
+            source=source,
         )
         ndjson_append(self._path, entry)
         return entry
@@ -43,6 +44,7 @@ class TaskQueue:
         priority: int = 3,
         agent_id: str = "ceo",
         parent_task_id: str | None = None,
+        source: str = "autonomous",
     ) -> TaskEntry:
         """新しいタスクを依存関係・親タスクID付きで追加する."""
         now = datetime.now(timezone.utc)
@@ -56,6 +58,7 @@ class TaskQueue:
             agent_id=agent_id,
             depends_on=depends_on,
             parent_task_id=parent_task_id,
+            source=source,
         )
         ndjson_append(self._path, entry)
         return entry
@@ -64,6 +67,7 @@ class TaskQueue:
         """優先度順で次のpendingタスクを返す (数値が小さい方が高優先度).
 
         依存関係が未完了のタスクはスキップする。
+        同一優先度時は作成日時が早いタスクを優先する。
         """
         all_tasks = self.list_all()
         completed_ids = {t.task_id for t in all_tasks if t.status == "completed"}
@@ -74,7 +78,7 @@ class TaskQueue:
         ]
         if not eligible:
             return None
-        eligible.sort(key=lambda t: t.priority)
+        eligible.sort(key=lambda t: (t.priority, t.created_at))
         return eligible[0]
 
     def update_status(

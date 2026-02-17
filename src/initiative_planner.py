@@ -194,7 +194,7 @@ class InitiativePlanner:
 
             # Add first step as task (only if not consulting)
             if entry.first_step and entry.status != "consulting":
-                task_entry = self._manager.task_queue.add(entry.first_step)
+                task_entry = self._manager.task_queue.add(entry.first_step, priority=2, source="initiative")
                 # Update initiative with the task_id
                 updated = entry.model_copy(
                     update={"task_ids": [task_entry.task_id]},

@@ -9,6 +9,7 @@ Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -82,7 +83,38 @@ class SubAgentRunner:
         )
 
         # Build prompt and run conversation
-        system_prompt = self._build_sub_agent_prompt(role, task_description)
+        purpose = None
+        try:
+            if self.manager.state.constitution is not None:
+                purpose = self.manager.state.constitution.purpose
+        except Exception:
+            purpose = None
+
+        vision_text = None
+        try:
+            vision_text = self.manager.vision_loader.load()
+        except Exception:
+            vision_text = None
+
+        rolling_summary_text = None
+        recalled_memories = None
+        try:
+            mm = getattr(self.manager, "memory_manager", None)
+            if mm is not None:
+                mm.ingest_all_sources()
+                rolling_summary_text = mm.summary_for_prompt()
+                recalled_memories = mm.recall_for_prompt(task_description, limit=6)
+        except Exception:
+            logger.warning("Failed to build memory context for sub-agent", exc_info=True)
+
+        system_prompt = self._build_sub_agent_prompt(
+            role,
+            task_description,
+            purpose=purpose,
+            vision_text=vision_text,
+            rolling_summary_text=rolling_summary_text,
+            recalled_memories=recalled_memories,
+        )
         try:
             result = self._run_conversation(
                 agent_id=agent_id,
@@ -101,6 +133,20 @@ class SubAgentRunner:
             self.manager.agent_registry.update_status(agent_id, "inactive")
         except Exception:
             logger.warning("Failed to deactivate agent %s", agent_id, exc_info=True)
+
+        # Persist sub-agent outcome into long-term summary/journal (best-effort)
+        try:
+            mm = getattr(self.manager, "memory_manager", None)
+            if mm is not None:
+                mm.note_interaction(
+                    timestamp=datetime.now(timezone.utc),
+                    user_id=agent_id,
+                    request_text=f"[sub-agent:{role}] {task_description}",
+                    response_text=result,
+                    snapshot_lines=[f"sub-agent: {name}", f"model: {effective_model}"],
+                )
+        except Exception:
+            logger.warning("Failed to persist sub-agent outcome", exc_info=True)
 
         return result
 
@@ -121,18 +167,63 @@ class SubAgentRunner:
             timeout=self.manager.llm_client.timeout,
         )
 
-    def _build_sub_agent_prompt(self, role: str, task_description: str) -> str:
+    def _build_sub_agent_prompt(
+        self,
+        role: str,
+        task_description: str,
+        *,
+        purpose: str | None = None,
+        vision_text: str | None = None,
+        rolling_summary_text: str | None = None,
+        recalled_memories: list[str] | None = None,
+    ) -> str:
         """サブエージェント用のシステムプロンプトを構築する."""
-        return (
-            f"あなたはAI会社のサブエージェントです。\n"
-            f"役割: {role}\n"
-            f"タスク: {task_description}\n\n"
-            f"以下のタグを使って応答してください:\n"
-            f"<shell>実行するシェルコマンド</shell>\n"
-            f"<reply>報告テキスト</reply>\n"
-            f"<done>完了メッセージ</done>\n\n"
-            f"タスクが完了したら必ず<done>タグで結果を報告してください。"
-        )
+        company_root = self.manager.base_dir / "companies" / self.manager.company_id
+        purpose_text = (purpose or "").strip() or "未設定"
+        vision = (vision_text or "").strip() or "未設定"
+
+        lines: list[str] = [
+            "あなたはAI会社のサブエージェントです。",
+            f"役割: {role}",
+            f"タスク: {task_description}",
+            "",
+            "## 会社の目的",
+            purpose_text,
+            "",
+            "## ビジョン",
+            vision,
+            "",
+            "## 社内ナレッジ参照先",
+            f"- {company_root / 'constitution.yaml'}",
+            f"- {company_root / 'vision.md'}",
+            f"- {company_root / 'state' / 'rolling_summary.md'}",
+            f"- {company_root / 'state' / 'memory.sqlite3'}",
+            f"- {company_root / 'journal'}",
+            "必要に応じて<shell>でファイル参照して構いません。",
+        ]
+
+        if rolling_summary_text and rolling_summary_text.strip():
+            lines.extend(["", rolling_summary_text.strip()])
+
+        if recalled_memories is not None:
+            lines.append("")
+            lines.append("## 長期記憶（リコール）")
+            if recalled_memories:
+                lines.extend(recalled_memories[:10])
+            else:
+                lines.append("リコールなし")
+
+        lines.extend([
+            "",
+            "以下のタグを使って応答してください:",
+            "<shell>実行するシェルコマンド</shell>",
+            "<reply>報告テキスト</reply>",
+            "<done>完了メッセージ</done>",
+            "",
+            "タスクが完了したら必ず<done>タグで結果を報告してください。",
+        ])
+
+        return "\n".join(lines)
 
     def _run_conversation(
         self,

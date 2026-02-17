@@ -181,9 +181,19 @@ def main() -> None:
                     f"⚠️ 承認処理中にエラーが発生しました (request_id: {request_id})"
                 )
 
-        def on_approval_text(request_id: str, text: str, user_id: str) -> None:
+        def on_approval_text(
+            request_id: str,
+            text: str,
+            user_id: str,
+            channel: str | None = None,
+            thread_ts: str | None = None,
+            thread_context: str | None = None,
+        ) -> None:
             """Handle free-form approval replies (thread reply preferred)."""
             log.info("Approval text for %s by %s: %s", request_id, user_id, text[:120])
+
+            def _reply(message: str) -> None:
+                slack.send_message(message, channel=channel, thread_ts=thread_ts)
 
             # Find pending proposal in decision_log by request_id
             proposal = None
@@ -197,15 +207,11 @@ def main() -> None:
                         proposal = entry
 
             if already_processed:
-                slack.send_message(
-                    f"⚠️ 承認リクエスト `{request_id}` は既に処理済みです"
-                )
+                _reply(f"⚠️ 承認リクエスト `{request_id}` は既に処理済みです")
                 return
 
             if proposal is None:
-                slack.send_message(
-                    f"⚠️ 承認リクエスト `{request_id}` に対応する提案が見つかりません"
-                )
+                _reply(f"⚠️ 承認リクエスト `{request_id}` に対応する提案が見つかりません")
                 return
 
             request_summary = (
@@ -214,6 +220,8 @@ def main() -> None:
                 f"why={proposal.why}\n"
                 f"scope={proposal.scope}\n"
             )
+            if thread_context and thread_context.strip():
+                request_summary += f"\nslack_thread_context:\n{thread_context.strip()[:6000]}\n"
             decision = classify_approval_text(
                 text,
                 request_summary=request_summary,
@@ -221,7 +229,7 @@ def main() -> None:
             )
 
             if decision == "unknown":
-                slack.send_message(
+                _reply(
                     f"⚠️ 判定できませんでした: `{request_id}`\n"
                     f"スレッドで「OK/NG」「進めて/やめて」など意図が分かる形で返信してください。"
                 )
@@ -241,7 +249,7 @@ def main() -> None:
                     mgr.state.constitution = updated
                     from manager_state import restore_state
                     mgr.state.decision_log = restore_state(BASE_DIR, COMPANY_ID).decision_log
-                    slack.send_message(
+                    _reply(
                         f"✅ 憲法変更が承認されました (v{updated.version})\n"
                         f"変更内容: {proposal.decision}"
                     )
@@ -255,7 +263,7 @@ def main() -> None:
                     )
                     from manager_state import restore_state
                     mgr.state.decision_log = restore_state(BASE_DIR, COMPANY_ID).decision_log
-                    slack.send_message(
+                    _reply(
                         f"❌ 憲法変更が却下されました\n"
                         f"変更内容: {proposal.decision}"
                     )
@@ -263,13 +271,29 @@ def main() -> None:
 
             except Exception:
                 log.exception("Error processing approval text for %s", request_id)
-                slack.send_message(
-                    f"⚠️ 承認処理中にエラーが発生しました (request_id: {request_id})"
-                )
+                _reply(f"⚠️ 承認処理中にエラーが発生しました (request_id: {request_id})")
 
-        def on_message(text: str, user_id: str) -> None:
-            log.info("Creator message: %s (from %s)", text[:100], user_id)
-            mgr.process_message(text, user_id)
+        def on_message(
+            text: str,
+            user_id: str,
+            channel: str | None = None,
+            thread_ts: str | None = None,
+            thread_context: str | None = None,
+        ) -> None:
+            log.info(
+                "Creator message: %s (from %s, channel=%s, thread_ts=%s)",
+                text[:100],
+                user_id,
+                channel,
+                thread_ts,
+            )
+            mgr.process_message(
+                text,
+                user_id,
+                slack_channel=channel,
+                slack_thread_ts=thread_ts,
+                slack_thread_context=thread_context,
+            )
 
         approval_store_path = BASE_DIR / "companies" / COMPANY_ID / "state" / "slack_approval_mapping.json"
 

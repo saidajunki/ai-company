@@ -216,6 +216,7 @@ class TaskEntry(BaseModel):
     task_id: str
     description: str
     priority: int = Field(default=3, ge=1, le=5)
+    source: Literal["creator", "autonomous", "initiative"] = "autonomous"
     status: Literal["pending", "running", "completed", "failed"]
     created_at: datetime
     updated_at: datetime

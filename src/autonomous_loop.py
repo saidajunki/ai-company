@@ -17,6 +17,7 @@ from artifact_verifier import ArtifactVerifier
 from context_builder import TaskHistoryContext, _build_task_history_section
 from llm_client import LLMError
 from models import TaskEntry
+from priority_classifier import PriorityClassifier
 from response_parser import parse_response
 from shell_command_tracker import ShellCommandTracker
 from shell_executor import execute_shell
@@ -185,6 +186,21 @@ class AutonomousLoop:
         history_text = "\n".join(history_parts) if history_parts else "なし"
         pending_text = "\n".join(pending_ids) if pending_ids else "なし"
 
+        # Long-term memory context (best-effort)
+        rolling_summary_text = None
+        recalled_memories = None
+        try:
+            mm = getattr(self.manager, "memory_manager", None)
+            if mm is not None:
+                mm.ingest_all_sources()
+                rolling_summary_text = mm.summary_for_prompt()
+                recalled_memories = mm.recall_for_prompt(
+                    f"タスク提案 {purpose}\n{vision_text}\n{latest_review}",
+                    limit=6,
+                )
+        except Exception:
+            logger.warning("Failed to build memory context for task proposal", exc_info=True)
+
         prompt = (
             "あなたはAI会社の社長AIです。\n"
             f"目的: {purpose}\n"
@@ -201,6 +217,11 @@ class AutonomousLoop:
             "- 施策1の説明 | 最初の一手: ... | 想定: 面白さa/25 コスト効率b/25 現実性c/25 進化性d/25\n"
             "- 施策2の説明 | depends_on:task_id1,task_id2\n"
         )
+        if rolling_summary_text:
+            prompt += "\n\n" + rolling_summary_text
+        if recalled_memories is not None:
+            prompt += "\n\n## 長期記憶（リコール）\n"
+            prompt += "\n".join(recalled_memories) if recalled_memories else "リコールなし"
 
         messages = [
             {"role": "system", "content": "タスク提案アシスタント"},
@@ -249,10 +270,11 @@ class AutonomousLoop:
                     deps = [d.strip() for d in dep_match.group(1).split(",") if d.strip()]
 
                 try:
+                    priority = PriorityClassifier.classify(desc, "autonomous")
                     if deps:
-                        entry = self.manager.task_queue.add_with_deps(desc, depends_on=deps)
+                        entry = self.manager.task_queue.add_with_deps(desc, depends_on=deps, priority=priority, source="autonomous")
                     else:
-                        entry = self.manager.task_queue.add(desc)
+                        entry = self.manager.task_queue.add(desc, priority=priority, source="autonomous")
                     tasks.append(entry)
                 except Exception:
                     logger.warning("Failed to add proposed task: %s", desc, exc_info=True)
@@ -287,14 +309,32 @@ class AutonomousLoop:
             logger.warning("Failed to build task history context", exc_info=True)
             task_history_text = ""
 
+        # Long-term memory context (best-effort)
+        rolling_summary_text = None
+        recalled_memories = None
+        try:
+            mm = getattr(self.manager, "memory_manager", None)
+            if mm is not None:
+                mm.ingest_all_sources()
+                rolling_summary_text = mm.summary_for_prompt()
+                recalled_memories = mm.recall_for_prompt(task.description, limit=6)
+        except Exception:
+            logger.warning("Failed to build memory context for task execution", exc_info=True)
+
         system_content = (
             "あなたはAI会社の社長AIです。タスクを実行してください。\n"
             "シェルコマンドが必要な場合は<shell>コマンド</shell>で指示してください。\n"
             "Creatorに相談が必要な場合は<consult>相談内容</consult>で送ってください。\n"
+            "社員エージェントに委任する場合は<delegate>role:タスク説明 model=モデル名</delegate>で指示してください（model=は省略可）。\n"
             "完了したら<done>結果の要約</done>で報告してください。"
         )
         if task_history_text:
             system_content += "\n\n" + task_history_text
+        if rolling_summary_text:
+            system_content += "\n\n" + rolling_summary_text
+        if recalled_memories is not None:
+            system_content += "\n\n## 長期記憶（リコール）\n"
+            system_content += "\n".join(recalled_memories) if recalled_memories else "リコールなし"
 
         messages: list[dict[str, str]] = [
             {"role": "system", "content": system_content},
@@ -368,6 +408,19 @@ class AutonomousLoop:
                         self.manager.task_queue.update_status(
                             task.task_id, "failed", error="相談待ち"
                         )
+                        try:
+                            mm = getattr(self.manager, "memory_manager", None)
+                            if mm is not None:
+                                mm.note_interaction(
+                                    timestamp=datetime.now(timezone.utc),
+                                    user_id="autonomous_loop",
+                                    request_text=f"[task:{task.task_id}] {task.description}",
+                                    response_text="FAILED: 相談待ち",
+                                    snapshot_lines=[f"consult: {consult_text[:120]}"],
+                                )
+                                mm.ingest_all_sources()
+                        except Exception:
+                            logger.warning("Failed to persist task outcome", exc_info=True)
                         self._check_parent_completion(task)
                         return
                     elif action.action_type == "shell_command":
@@ -393,6 +446,7 @@ class AutonomousLoop:
                                 name=role,
                                 role=role,
                                 task_description=desc,
+                                model=action.model,
                             )
                             result_text = f"サブエージェント結果 (role={role}):\n{sub_result}"
                         except Exception as exc:
@@ -412,6 +466,19 @@ class AutonomousLoop:
                         self.manager.task_queue.update_status(
                             task.task_id, "failed", error=error_msg
                         )
+                        try:
+                            mm = getattr(self.manager, "memory_manager", None)
+                            if mm is not None:
+                                mm.note_interaction(
+                                    timestamp=datetime.now(timezone.utc),
+                                    user_id="autonomous_loop",
+                                    request_text=f"[task:{task.task_id}] {task.description}",
+                                    response_text=f"FAILED: {error_msg}",
+                                    snapshot_lines=["reason: all_shell_failed"],
+                                )
+                                mm.ingest_all_sources()
+                        except Exception:
+                            logger.warning("Failed to persist task outcome", exc_info=True)
                         self._check_parent_completion(task)
                         self._report(f"タスク失敗(全コマンド失敗): {task.description}\n{error_msg}")
                         return
@@ -429,6 +496,19 @@ class AutonomousLoop:
                             self.manager.task_queue.update_status(
                                 task.task_id, "failed", error=error_msg
                             )
+                            try:
+                                mm = getattr(self.manager, "memory_manager", None)
+                                if mm is not None:
+                                    mm.note_interaction(
+                                        timestamp=datetime.now(timezone.utc),
+                                        user_id="autonomous_loop",
+                                        request_text=f"[task:{task.task_id}] {task.description}",
+                                        response_text=f"FAILED: {error_msg}",
+                                        snapshot_lines=["reason: artifact_missing"],
+                                    )
+                                    mm.ingest_all_sources()
+                            except Exception:
+                                logger.warning("Failed to persist task outcome", exc_info=True)
                             self._check_parent_completion(task)
                             self._report(f"タスク失敗(成果物欠損): {task.description}\n{error_msg}")
                             return
@@ -448,6 +528,19 @@ class AutonomousLoop:
                             quality_score=q_score,
                             quality_notes=q_notes,
                         )
+                        try:
+                            mm = getattr(self.manager, "memory_manager", None)
+                            if mm is not None:
+                                mm.note_interaction(
+                                    timestamp=datetime.now(timezone.utc),
+                                    user_id="autonomous_loop",
+                                    request_text=f"[task:{task.task_id}] {task.description}",
+                                    response_text=f"FAILED(quality): {q_notes}",
+                                    snapshot_lines=[f"quality_score: {q_score:.2f}"],
+                                )
+                                mm.ingest_all_sources()
+                        except Exception:
+                            logger.warning("Failed to persist task outcome", exc_info=True)
                         self._check_parent_completion(task)
                         self._report(
                             f"タスク品質不足: {task.description}\n"
@@ -459,6 +552,21 @@ class AutonomousLoop:
                             quality_score=q_score,
                             quality_notes=q_notes,
                         )
+                        try:
+                            mm = getattr(self.manager, "memory_manager", None)
+                            if mm is not None:
+                                mm.note_interaction(
+                                    timestamp=datetime.now(timezone.utc),
+                                    user_id="autonomous_loop",
+                                    request_text=f"[task:{task.task_id}] {task.description}",
+                                    response_text=done_result,
+                                    snapshot_lines=[
+                                        f"quality_score: {q_score:.2f}" if q_score is not None else "quality_score: n/a",
+                                    ],
+                                )
+                                mm.ingest_all_sources()
+                        except Exception:
+                            logger.warning("Failed to persist task outcome", exc_info=True)
                         self._report(f"タスク完了: {task.description}\n結果: {done_result}")
                         self._check_initiative_completion(task.task_id)
                         self._check_parent_completion(task)
@@ -469,6 +577,19 @@ class AutonomousLoop:
                     self.manager.task_queue.update_status(
                         task.task_id, "completed", result=result.content
                     )
+                    try:
+                        mm = getattr(self.manager, "memory_manager", None)
+                        if mm is not None:
+                            mm.note_interaction(
+                                timestamp=datetime.now(timezone.utc),
+                                user_id="autonomous_loop",
+                                request_text=f"[task:{task.task_id}] {task.description}",
+                                response_text=result.content,
+                                snapshot_lines=["done_tag: none"],
+                            )
+                            mm.ingest_all_sources()
+                    except Exception:
+                        logger.warning("Failed to persist task outcome", exc_info=True)
                     self._report(f"タスク完了: {task.description}")
                     self._check_initiative_completion(task.task_id)
                     self._check_parent_completion(task)
@@ -478,6 +599,19 @@ class AutonomousLoop:
             self.manager.task_queue.update_status(
                 task.task_id, "failed", error="最大ターン数到達"
             )
+            try:
+                mm = getattr(self.manager, "memory_manager", None)
+                if mm is not None:
+                    mm.note_interaction(
+                        timestamp=datetime.now(timezone.utc),
+                        user_id="autonomous_loop",
+                        request_text=f"[task:{task.task_id}] {task.description}",
+                        response_text="FAILED: 最大ターン数到達",
+                        snapshot_lines=["reason: max_turns"],
+                    )
+                    mm.ingest_all_sources()
+            except Exception:
+                logger.warning("Failed to persist task outcome", exc_info=True)
             self._check_parent_completion(task)
             self._report(f"タスク中断(最大ターン数): {task.description}")
 
@@ -749,4 +883,3 @@ class AutonomousLoop:
             logger.exception(
                 "Error checking parent completion for task %s", task.task_id
             )
-

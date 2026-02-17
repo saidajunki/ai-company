@@ -156,6 +156,21 @@ class TestSpawnFlow:
         result = runner.spawn("Worker", "developer", "コードを書く")
         assert result == "タスク完了"
 
+    def test_spawn_includes_internal_knowledge_context(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mock_sub = _make_mock_llm()
+        runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
+
+        runner.spawn("Worker", "developer", "コードを書く")
+
+        first_messages = mock_sub.chat.call_args_list[0][0][0]
+        system_prompt = first_messages[0]["content"]
+        assert "## 社内ナレッジ参照先" in system_prompt
+        assert "vision.md" in system_prompt
+        assert "## 永続メモリ（要約）" in system_prompt
+        assert "## 長期記憶（リコール）" in system_prompt
+
     def test_spawn_registers_agent(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
         mock_sub = _make_mock_llm()

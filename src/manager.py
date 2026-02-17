@@ -165,6 +165,8 @@ class Manager:
         # Set externally after construction
         self.llm_client: LLMClient | None = None
         self.slack: "SlackBot | None" = None  # noqa: F821 — forward ref
+        self._slack_reply_channel: str | None = None
+        self._slack_reply_thread_ts: str | None = None
 
         # Conversation memory (Req 1.1, 1.5)
         self.conversation_memory = ConversationMemory(base_dir, company_id)
@@ -697,7 +699,15 @@ class Manager:
     # Message processing — Think → Act → Report (Req 3.1–3.4, 4.1–4.6)
     # ------------------------------------------------------------------
 
-    def process_message(self, text: str, user_id: str) -> None:
+    def process_message(
+        self,
+        text: str,
+        user_id: str,
+        *,
+        slack_channel: str | None = None,
+        slack_thread_ts: str | None = None,
+        slack_thread_context: str | None = None,
+    ) -> None:
         """Creatorメッセージを処理する（Think → Act → Report）.
 
         1. 予算チェック
@@ -710,6 +720,10 @@ class Manager:
         task_id = f"msg-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
         logger.info("process_message start: user=%s task=%s", user_id, task_id)
 
+        prev_channel = self._slack_reply_channel
+        prev_thread = self._slack_reply_thread_ts
+        self._slack_reply_channel = slack_channel
+        self._slack_reply_thread_ts = slack_thread_ts
         try:
             stripped = (text or "").strip()
 
@@ -849,7 +863,7 @@ class Manager:
             # モデルカタログ生成
             model_catalog_text = None
             try:
-                catalog = build_model_catalog(self.state.pricing_cache)
+                catalog = build_model_catalog(self.pricing_cache)
                 model_catalog_text = format_model_catalog_for_prompt(catalog) or None
             except Exception:
                 logger.warning("Failed to build model catalog", exc_info=True)
@@ -866,6 +880,7 @@ class Manager:
                 research_notes=research_notes,
                 rolling_summary=rolling_summary_text,
                 recalled_memories=recalled_memories,
+                slack_thread_context=slack_thread_context,
                 task_history=task_history,
                 active_initiatives=self._load_active_initiatives(),
                 strategy_direction=self._load_strategy_direction(),
@@ -956,6 +971,9 @@ class Manager:
         except Exception:
             logger.exception("Unexpected error in process_message")
             self._slack_send("エラー: メッセージ処理中に予期しないエラーが発生しました")
+        finally:
+            self._slack_reply_channel = prev_channel
+            self._slack_reply_thread_ts = prev_thread
 
     def _load_active_initiatives(self) -> list | None:
         """Load active initiatives (in_progress + planned) for context builder."""
@@ -1328,7 +1346,7 @@ class Manager:
             return
 
         # 親タスクを登録
-        parent = self.task_queue.add(description=f"[親] {task_description}")
+        parent = self.task_queue.add(description=f"[親] {task_description}", priority=1, source="creator")
 
         # サブタスクを依存関係付きで登録
         task_id_map: dict[int, str] = {}  # plan内番号 → 実際のtask_id
@@ -1338,6 +1356,8 @@ class Manager:
                 description=st.description,
                 depends_on=depends_on,
                 parent_task_id=parent.task_id,
+                priority=1,
+                source="creator",
             )
             task_id_map[st.index] = entry.task_id
 
@@ -1349,10 +1369,20 @@ class Manager:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _slack_send(self, text: str) -> None:
+    def _slack_send(
+        self,
+        text: str,
+        *,
+        channel: str | None = None,
+        thread_ts: str | None = None,
+    ) -> None:
         """Send a message via Slack if the bot is configured."""
         if self.slack is not None:
-            self.slack.send_message(text)
+            self.slack.send_message(
+                text,
+                channel=channel or self._slack_reply_channel,
+                thread_ts=thread_ts or self._slack_reply_thread_ts,
+            )
         else:
             logger.warning("Slack not configured, message not sent: %s", text[:100])
 

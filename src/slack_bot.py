@@ -11,9 +11,11 @@ Req 4.1-4.7: Approval protocol via reactions
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -35,8 +37,8 @@ class SlackBot:
         app_token: str,
         *,
         on_reaction: Callable[[str, str, str], None] | None = None,
-        on_message: Callable[[str, str], None] | None = None,
-        on_approval_text: Callable[[str, str, str], None] | None = None,
+        on_message: Callable[..., None] | None = None,
+        on_approval_text: Callable[..., None] | None = None,
         approval_store_path: str | Path | None = None,
         creator_user_id: str | None = CREATOR_USER_ID,
     ) -> None:
@@ -60,6 +62,128 @@ class SlackBot:
         self._load_approval_mapping()
 
         self._register_handlers()
+
+    def _call_on_approval_text(
+        self,
+        *,
+        request_id: str,
+        text: str,
+        user_id: str,
+        channel: str | None,
+        thread_ts: str | None,
+        thread_context: str | None,
+    ) -> None:
+        if not self._on_approval_text:
+            return
+        try:
+            argc = len(inspect.signature(self._on_approval_text).parameters)
+        except Exception:
+            argc = 3
+
+        # Backward compat: old callbacks are (request_id, text, user_id)
+        if argc <= 3:
+            self._on_approval_text(request_id, text, user_id)
+            return
+
+        # New callbacks: (request_id, text, user_id, channel, thread_ts, thread_context)
+        self._on_approval_text(request_id, text, user_id, channel, thread_ts, thread_context)
+
+    def _call_on_message(
+        self,
+        *,
+        text: str,
+        user_id: str,
+        channel: str | None,
+        thread_ts: str | None,
+        thread_context: str | None,
+    ) -> None:
+        if not self._on_message:
+            return
+        try:
+            argc = len(inspect.signature(self._on_message).parameters)
+        except Exception:
+            argc = 2
+
+        # Backward compat: old callbacks are (text, user_id)
+        if argc <= 2:
+            self._on_message(text, user_id)
+            return
+
+        # New callbacks: (text, user_id, channel, thread_ts, thread_context)
+        self._on_message(text, user_id, channel, thread_ts, thread_context)
+
+    def _format_thread_context(
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        exclude_ts: str | None = None,
+        max_chars: int = 12_000,
+    ) -> str | None:
+        """Fetch and format full thread transcript (best-effort)."""
+        try:
+            messages: list[dict] = []
+            cursor: str | None = None
+            while True:
+                kwargs = {"channel": channel, "ts": thread_ts, "limit": 200}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                resp = self.app.client.conversations_replies(**kwargs)
+                batch = resp.get("messages") or []
+                if isinstance(batch, list):
+                    messages.extend(batch)
+                meta = resp.get("response_metadata") or {}
+                cursor = (meta.get("next_cursor") or "").strip() or None
+                if not cursor:
+                    break
+
+            lines: list[str] = []
+            for m in messages:
+                text = (m.get("text") or "").strip()
+                if not text:
+                    continue
+                if exclude_ts and (m.get("ts") == exclude_ts):
+                    continue
+                subtype = (m.get("subtype") or "").strip()
+                if subtype in ("message_changed", "message_deleted"):
+                    continue
+
+                ts_raw = m.get("ts") or ""
+                try:
+                    ts_f = float(ts_raw)
+                    dt = datetime.fromtimestamp(ts_f, tz=timezone.utc)
+                    ts = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    ts = str(ts_raw)
+
+                is_bot = bool(m.get("bot_id")) or subtype == "bot_message"
+                user = m.get("user") or ("bot" if is_bot else "unknown")
+                who = "creator" if (self._creator_user_id and user == self._creator_user_id) else user
+                role = "assistant" if is_bot else "user"
+
+                if len(text) > 2000:
+                    text = text[:2000] + "…"
+                lines.append(f"- [{role}:{who}] {ts}: {text}")
+
+            if not lines:
+                return None
+
+            header = f"channel={channel} thread_ts={thread_ts}"
+            content = "\n".join([header, *lines])
+            if len(content) <= max_chars:
+                return content
+
+            head = "\n".join([header, *lines[:30]])
+            tail = "\n".join(lines[-30:])
+            trimmed = f"{head}\n...\n{tail}"
+            return trimmed[:max_chars] + "…"
+        except Exception:
+            log.exception(
+                "Failed to fetch thread context (channel=%s thread_ts=%s)",
+                channel,
+                thread_ts,
+            )
+            return None
 
     def _load_approval_mapping(self) -> None:
         """Load approval message mapping from disk (best-effort)."""
@@ -126,6 +250,8 @@ class SlackBot:
         def handle_app_mention(event: dict, say) -> None:
             text = event.get("text", "")
             user_id = event.get("user", "")
+            channel = event.get("channel", "") or ""
+            thread_ts = event.get("thread_ts") or ""
             if not text or not user_id:
                 return
             # Strip the mention tag (e.g. "<@U12345> hello" -> "hello")
@@ -135,17 +261,33 @@ class SlackBot:
                 return
 
             log.info("Mention from %s: %s", user_id, text[:80])
-            if self._on_message:
-                self._on_message(text, user_id)
+            thread_context = None
+            if channel and thread_ts:
+                thread_context = self._format_thread_context(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    exclude_ts=event.get("ts") or None,
+                )
+            self._call_on_message(
+                text=text,
+                user_id=user_id,
+                channel=channel or None,
+                thread_ts=thread_ts or None,
+                thread_context=thread_context,
+            )
 
         @self.app.event("message")
         def handle_message(event: dict, say) -> None:
             text = event.get("text", "")
             user_id = event.get("user", "")
+            channel = event.get("channel", "") or ""
             if not text or not user_id:
                 return
             # Ignore bot messages
             if event.get("bot_id"):
+                return
+            # Ignore non-standard message subtypes (edited/deleted/etc)
+            if event.get("subtype"):
                 return
 
             # Approval via thread reply / request_id mention
@@ -167,12 +309,38 @@ class SlackBot:
                     log.info("Ignoring approval text from non-creator user: %s", user_id)
                     return
                 log.info("Approval reply detected for %s by %s", request_id, user_id)
-                self._on_approval_text(request_id, text, user_id)
+                thread_context = None
+                if channel and thread_ts:
+                    thread_context = self._format_thread_context(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        exclude_ts=event.get("ts") or None,
+                    )
+                self._call_on_approval_text(
+                    request_id=request_id,
+                    text=text,
+                    user_id=user_id,
+                    channel=channel or None,
+                    thread_ts=thread_ts or None,
+                    thread_context=thread_context,
+                )
                 return
 
             log.info("Message from %s: %s", user_id, text[:80])
-            if self._on_message:
-                self._on_message(text, user_id)
+            thread_context = None
+            if channel and thread_ts:
+                thread_context = self._format_thread_context(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    exclude_ts=event.get("ts") or None,
+                )
+            self._call_on_message(
+                text=text,
+                user_id=user_id,
+                channel=channel or None,
+                thread_ts=thread_ts or None,
+                thread_context=thread_context,
+            )
 
     def start(self) -> None:
         """Start Socket Mode connection in a background thread."""
@@ -235,13 +403,22 @@ class SlackBot:
             log.exception("Failed to send approval request")
             return None
 
-    def send_message(self, text: str) -> str | None:
-        """Post a generic message to the governance channel."""
+    def send_message(
+        self,
+        text: str,
+        *,
+        channel: str | None = None,
+        thread_ts: str | None = None,
+    ) -> str | None:
+        """Post a generic message to a channel, optionally as a thread reply."""
         try:
-            result = self.app.client.chat_postMessage(
-                channel=GOVERNANCE_CHANNEL,
-                text=text,
-            )
+            kwargs: dict[str, object] = {
+                "channel": channel or GOVERNANCE_CHANNEL,
+                "text": text,
+            }
+            if thread_ts:
+                kwargs["thread_ts"] = thread_ts
+            result = self.app.client.chat_postMessage(**kwargs)
             return result.get("ts")
         except Exception:
             log.exception("Failed to send message")
