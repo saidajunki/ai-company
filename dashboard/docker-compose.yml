@@ -1,0 +1,24 @@
+services:
+  ai-company-dashboard:
+    build: .
+    image: ai-company-dashboard:latest
+    container_name: ai-company-dashboard
+    restart: unless-stopped
+    environment:
+      - DATA_DIR=/app/data
+      - COMPANY_ID=alpha
+      - POLL_INTERVAL=10
+    volumes:
+      - ai-company-data:/app/data:ro
+    networks:
+      - apps-network
+    ports:
+      - "8501:8000"
+
+volumes:
+  ai-company-data:
+    external: true
+
+networks:
+  apps-network:
+    external: true

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI会社 ダッシュボード</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header role="banner">
+    <div class="header-inner">
+      <h1>AI会社 ダッシュボード</h1>
+      <div class="header-status">
+        <span id="connection-status" class="badge badge-gray" aria-live="polite">接続中...</span>
+        <time id="last-updated" aria-label="最終更新日時">--</time>
+      </div>
+    </div>
+  </header>
+
+  <main role="main" aria-label="ダッシュボードメインコンテンツ">
+    <!-- Top row: Heartbeat + Cost -->
+    <div class="grid grid-2">
+      <section class="card" aria-labelledby="heartbeat-heading">
+        <h2 id="heartbeat-heading">💓 ハートビート</h2>
+        <div class="card-body">
+          <div class="status-row">
+            <span class="label">ステータス:</span>
+            <span id="heartbeat-status" class="badge badge-gray">読み込み中...</span>
+          </div>
+          <div class="status-row">
+            <span class="label">進行中タスク:</span>
+            <ul id="heartbeat-wip" class="wip-list" aria-label="進行中タスク一覧">
+              <li>読み込み中...</li>
+            </ul>
+          </div>
+          <div class="status-row">
+            <span class="label">最終更新:</span>
+            <time id="heartbeat-updated">--</time>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="cost-heading">
+        <h2 id="cost-heading">💰 コスト</h2>
+        <div class="card-body">
+          <div class="status-row">
+            <span class="label">直近60分:</span>
+            <span id="cost-window">--</span>
+          </div>
+          <div class="status-row">
+            <span class="label">累計:</span>
+            <span id="cost-total">--</span>
+          </div>
+          <div class="status-row">
+            <span class="label">予算上限:</span>
+            <span id="cost-limit">--</span>
+          </div>
+          <div class="cost-bar-container" role="progressbar" aria-label="予算使用率" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+            <div id="cost-bar" class="cost-bar" style="width: 0%"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Middle section: Agents + Tasks -->
+    <div class="grid grid-2">
+      <section class="card" aria-labelledby="agents-heading">
+        <h2 id="agents-heading">🤖 エージェント一覧</h2>
+        <div class="card-body">
+          <table class="data-table" aria-label="エージェント一覧">
+            <thead>
+              <tr>
+                <th scope="col">名前</th>
+                <th scope="col">役割</th>
+                <th scope="col">モデル</th>
+                <th scope="col">ステータス</th>
+              </tr>
+            </thead>
+            <tbody id="agents-list">
+              <tr><td colspan="4">読み込み中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="tasks-heading">
+        <h2 id="tasks-heading">📋 タスクサマリー</h2>
+        <div class="card-body">
+          <div id="tasks-summary" class="tasks-summary" aria-label="タスクステータス件数">
+            <div class="summary-item">
+              <span class="badge badge-yellow">待機</span>
+              <span class="count">--</span>
+            </div>
+            <div class="summary-item">
+              <span class="badge badge-blue">実行中</span>
+              <span class="count">--</span>
+            </div>
+            <div class="summary-item">
+              <span class="badge badge-green">完了</span>
+              <span class="count">--</span>
+            </div>
+            <div class="summary-item">
+              <span class="badge badge-red">失敗</span>
+              <span class="count">--</span>
+            </div>
+          </div>
+          <h3>最近のタスク</h3>
+          <ul id="tasks-list" class="tasks-list" aria-label="最近のタスク一覧">
+            <li>読み込み中...</li>
+          </ul>
+        </div>
+      </section>
+    </div>
+
+    <!-- Bottom section: Initiatives, Consultations, Conversations -->
+    <section class="card" aria-labelledby="initiatives-heading">
+      <h2 id="initiatives-heading">🚀 イニシアチブ</h2>
+      <div class="card-body">
+        <div id="initiatives-list" aria-label="イニシアチブ一覧">
+          <p>読み込み中...</p>
+        </div>
+      </div>
+    </section>
+
+    <div class="grid grid-2">
+      <section class="card" aria-labelledby="consultations-heading">
+        <h2 id="consultations-heading">
+          💬 相談事項
+          <span id="consultations-count" class="badge badge-red" aria-label="未解決の相談件数" hidden>0</span>
+        </h2>
+        <div class="card-body">
+          <ul id="consultations-list" class="consultations-list" aria-label="相談事項一覧">
+            <li>読み込み中...</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="conversations-heading">
+        <h2 id="conversations-heading">🗣️ 会話履歴</h2>
+        <div class="card-body">
+          <div id="conversations-list" class="conversations-list" role="log" aria-label="会話履歴" aria-live="polite">
+            <p>読み込み中...</p>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer role="contentinfo">
+    <p>AI会社 ダッシュボード — リアルタイムモニタリング</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

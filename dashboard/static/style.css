@@ -1,0 +1,468 @@
+/* ===========================
+   AI会社 ダッシュボード - Style
+   =========================== */
+
+/* --- Custom Properties --- */
+:root {
+  --bg-primary: #1a1a2e;
+  --bg-card: #16213e;
+  --bg-header: #0f3460;
+  --bg-footer: #0f3460;
+  --text-primary: #e0e0e0;
+  --text-secondary: #a0a0b8;
+  --text-heading: #ffffff;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+
+  --color-green: #00b894;
+  --color-yellow: #fdcb6e;
+  --color-red: #e17055;
+  --color-blue: #74b9ff;
+  --color-orange: #e67e22;
+  --color-gray: #636e72;
+
+  --radius: 8px;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  --transition: 0.25s ease;
+
+  --font-stack: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+}
+
+/* --- Reset & Base --- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-stack);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+/* --- Header --- */
+header {
+  background: var(--bg-header);
+  padding: 1rem 1.5rem;
+  box-shadow: var(--shadow);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.header-inner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 1400px;
+  margin: 0 auto;
+  gap: 1rem;
+}
+
+.header-inner h1 {
+  font-size: 1.25rem;
+  color: var(--text-heading);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.header-status {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+/* --- Main --- */
+main {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* --- Grid Layout --- */
+.grid {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.grid-2 {
+  grid-template-columns: 1fr 1fr;
+}
+
+/* --- Card --- */
+.card {
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+  transition: box-shadow var(--transition);
+}
+
+.card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.card h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-heading);
+  padding: 0.85rem 1.25rem;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.card h3 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-heading);
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.card-body {
+  padding: 1.25rem;
+}
+
+/* --- Badge --- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2em 0.65em;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border-radius: 999px;
+  white-space: nowrap;
+  transition: background var(--transition), color var(--transition);
+}
+
+.badge-gray {
+  background: var(--color-gray);
+  color: #fff;
+}
+
+.badge-green {
+  background: var(--color-green);
+  color: #fff;
+}
+
+.badge-yellow {
+  background: var(--color-yellow);
+  color: #1a1a2e;
+}
+
+.badge-blue {
+  background: var(--color-blue);
+  color: #1a1a2e;
+}
+
+.badge-red {
+  background: var(--color-red);
+  color: #fff;
+}
+
+.badge-orange {
+  background: var(--color-orange);
+  color: #fff;
+}
+
+/* Pulsing animation for waiting_approval */
+.badge-pulse {
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.06); }
+}
+
+/* --- Status Row --- */
+.status-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.status-row:last-child {
+  margin-bottom: 0;
+}
+
+.label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+/* --- WIP List --- */
+.wip-list {
+  list-style: none;
+  font-size: 0.85rem;
+}
+
+.wip-list li {
+  padding: 0.2rem 0;
+  color: var(--text-primary);
+}
+
+/* --- Cost Bar --- */
+.cost-bar-container {
+  width: 100%;
+  height: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 5px;
+  overflow: hidden;
+  margin-top: 0.75rem;
+}
+
+.cost-bar {
+  height: 100%;
+  background: var(--color-green);
+  border-radius: 5px;
+  transition: width 0.6s ease, background 0.4s ease;
+}
+
+.cost-bar.warning {
+  background: var(--color-yellow);
+}
+
+.cost-bar.danger {
+  background: var(--color-red);
+}
+
+/* --- Data Table --- */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.data-table th {
+  text-align: left;
+  color: var(--text-secondary);
+  font-weight: 600;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.data-table td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* --- Tasks Summary --- */
+.tasks-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.summary-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.summary-item .count {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text-heading);
+}
+
+/* --- Tasks List --- */
+.tasks-list {
+  list-style: none;
+  font-size: 0.85rem;
+}
+
+.tasks-list li {
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+}
+
+.tasks-list li:last-child {
+  border-bottom: none;
+}
+
+/* --- Consultations List --- */
+.consultations-list {
+  list-style: none;
+  font-size: 0.85rem;
+}
+
+.consultations-list li {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+}
+
+.consultations-list li:last-child {
+  border-bottom: none;
+}
+
+/* --- Conversations --- */
+.conversations-list {
+  max-height: 400px;
+  overflow-y: auto;
+  font-size: 0.85rem;
+}
+
+.conversations-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.conversations-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.conversations-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+.conversation-entry {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.conversation-entry:last-child {
+  border-bottom: none;
+}
+
+.role-badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 0.15em 0.5em;
+  border-radius: 4px;
+  margin-right: 0.4rem;
+}
+
+/* --- Initiative --- */
+.initiative-group {
+  margin-bottom: 1.25rem;
+}
+
+.initiative-group:last-child {
+  margin-bottom: 0;
+}
+
+.initiative-group h3 {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+}
+
+.initiative-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.initiative-card:last-child {
+  margin-bottom: 0;
+}
+
+/* --- Scores Grid --- */
+.scores-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.scores-grid > div {
+  text-align: center;
+  padding: 0.3rem;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 4px;
+}
+
+/* --- Footer --- */
+footer {
+  text-align: center;
+  padding: 1.25rem;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 1rem;
+}
+
+/* --- Responsive: Mobile (<768px) --- */
+@media (max-width: 768px) {
+  .grid-2 {
+    grid-template-columns: 1fr;
+  }
+
+  .header-inner {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .header-inner h1 {
+    font-size: 1.1rem;
+  }
+
+  main {
+    padding: 1rem;
+    gap: 1rem;
+  }
+
+  .card h2 {
+    font-size: 0.95rem;
+    padding: 0.75rem 1rem;
+  }
+
+  .card-body {
+    padding: 1rem;
+  }
+
+  .tasks-summary {
+    gap: 0.5rem;
+  }
+
+  .data-table {
+    font-size: 0.78rem;
+  }
+
+  .data-table th,
+  .data-table td {
+    padding: 0.4rem 0.5rem;
+  }
+
+  .conversations-list {
+    max-height: 300px;
+  }
+
+  .scores-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
