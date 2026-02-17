@@ -22,10 +22,13 @@ from typing import Callable
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+from event_deduper import EventDeduper
+
 log = logging.getLogger("ai-company.slack")
 
 GOVERNANCE_CHANNEL = os.environ.get("SLACK_CHANNEL_ID", "C0AF21AFC14")
 CREATOR_USER_ID = os.environ.get("CREATOR_SLACK_USER_ID", "").strip() or None
+_DEFAULT_DEDUP_TTL_SECONDS = int(os.environ.get("SLACK_EVENT_DEDUP_TTL_SECONDS", "900"))  # 15m
 
 
 class SlackBot:
@@ -60,8 +63,16 @@ class SlackBot:
         self._approval_messages: dict[str, str] = {}
         self._approval_store_path = Path(approval_store_path) if approval_store_path else None
         self._load_approval_mapping()
+        # Best-effort de-dup for Slack message events (Socket Mode can deliver both message + app_mention)
+        self._event_deduper = EventDeduper(ttl_seconds=_DEFAULT_DEDUP_TTL_SECONDS)
 
         self._register_handlers()
+
+    def _should_process_message(self, *, channel: str, ts: str) -> bool:
+        """Return True if this (channel, ts) event should be processed (dedup within TTL)."""
+        if not channel or not ts:
+            return True
+        return self._event_deduper.should_process(f"{channel}:{ts}")
 
     def _call_on_approval_text(
         self,
@@ -252,7 +263,11 @@ class SlackBot:
             user_id = event.get("user", "")
             channel = event.get("channel", "") or ""
             thread_ts = event.get("thread_ts") or ""
+            ts = event.get("ts") or ""
             if not text or not user_id:
+                return
+            if channel and ts and not self._should_process_message(channel=channel, ts=ts):
+                log.info("Skipping duplicate app_mention event (channel=%s ts=%s)", channel, ts)
                 return
             # Strip the mention tag (e.g. "<@U12345> hello" -> "hello")
             import re
@@ -281,6 +296,7 @@ class SlackBot:
             text = event.get("text", "")
             user_id = event.get("user", "")
             channel = event.get("channel", "") or ""
+            ts = event.get("ts") or ""
             if not text or not user_id:
                 return
             # Ignore bot messages
@@ -288,6 +304,9 @@ class SlackBot:
                 return
             # Ignore non-standard message subtypes (edited/deleted/etc)
             if event.get("subtype"):
+                return
+            if channel and ts and not self._should_process_message(channel=channel, ts=ts):
+                log.info("Skipping duplicate message event (channel=%s ts=%s)", channel, ts)
                 return
 
             # Approval via thread reply / request_id mention

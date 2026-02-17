@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from artifact_verifier import ArtifactVerifier
+from consultation_policy import assess_creator_consultation, should_escalate_task_failure
 from context_builder import TaskHistoryContext, _build_task_history_section
 from llm_client import LLMError
 from models import TaskEntry
@@ -341,7 +342,8 @@ class AutonomousLoop:
         system_content = (
             "あなたはAI会社の社長AIです。タスクを実行してください。\n"
             "シェルコマンドが必要な場合は<shell>コマンド</shell>で指示してください。\n"
-            "Creatorに相談が必要な場合は<consult>相談内容</consult>で送ってください。\n"
+            "Creatorへの<consult>は重大事項のみに限定してください（方向性/ビジョン変更、課金・契約・広告出稿などお金が動く、法/規約/炎上/個人情報など高リスク）。\n"
+            "それ以外の迷いはCEO判断で進め、仮定と理由を<reply>や<memory>daily</memory>に残してください。\n"
             "社員エージェントに委任する場合は<delegate>役割名:タスク説明 model=モデル名</delegate>で指示してください（model=は省略可）。\n"
             "  例: <delegate>researcher:最新のAI市場動向を調査</delegate>\n"
             "  例: <delegate>writer:調査結果をレポートにまとめる model=gpt-4o</delegate>\n"
@@ -445,6 +447,32 @@ class AutonomousLoop:
                         self._report(action.content)
                     elif action.action_type == "consult":
                         consult_text = action.content.strip()
+                        assessment = assess_creator_consultation(
+                            consult_text,
+                            constitution=self.manager.state.constitution,
+                        )
+
+                        if not assessment.is_major:
+                            logger.info(
+                                "Treating consultation as minor (reason=%s); proceeding autonomously",
+                                assessment.reason,
+                            )
+                            autonomy_note = (
+                                "（自律方針）以下は重大な意思決定ではないためCreatorには相談しません。\n"
+                                "あなた（CEO AI）が最も安全・低コスト・可逆な選択を仮決定して作業を継続してください。\n"
+                                f"- 相談内容: {consult_text}\n"
+                                "\n"
+                                "制約:\n"
+                                "- 課金/契約/アカウント作成/広告出稿/ドメイン購入など「お金が動く」行為はしない\n"
+                                "- 会社の目的/ビジョン/憲法の変更はしない（必要なら重大事項として別途<consult>）\n"
+                                "- 外部公開は機密/炎上/規約リスクがない範囲で小さく。迷う場合は公開しない\n"
+                                "\n"
+                                "この方針に従い、以降は<consult>を使わず進めてください。"
+                            )
+                            messages.append({"role": "user", "content": autonomy_note})
+                            needs_followup = True
+                            break
+
                         try:
                             entry, created = self.manager.consultation_store.ensure_pending(
                                 consult_text,
@@ -828,7 +856,7 @@ class AutonomousLoop:
         failed = self.manager.task_queue.list_by_status("failed")
         for task in sorted(failed, key=lambda t: t.priority):
             # エスカレーション済みタスクはスキップ
-            if task.error and task.error.startswith("[escalated]"):
+            if task.error and (task.error.startswith("[escalated]") or task.error.startswith("[abandoned]")):
                 continue
             if task.retry_count < task.max_retries:
                 logger.info(
@@ -845,7 +873,11 @@ class AutonomousLoop:
                 self._escalate_to_creator(task)
 
     def _escalate_to_creator(self, task: TaskEntry) -> None:
-        """max_retries到達タスクをCreatorにエスカレーションする."""
+        """max_retries到達タスクをCreatorにエスカレーションする（必要な場合のみ）。"""
+        if not should_escalate_task_failure(task, constitution=self.manager.state.constitution):
+            self._abandon_task(task)
+            return
+
         content = (
             f"タスク '{task.description}' が{task.max_retries}回リトライ後も失敗しました。\n"
             f"最終エラー: {task.error or '不明'}\n"
@@ -878,6 +910,48 @@ class AutonomousLoop:
             )
         except Exception:
             logger.warning("Failed to mark task as escalated: %s", task.task_id, exc_info=True)
+
+    def _abandon_task(self, task: TaskEntry) -> None:
+        """低重要度タスクを自律判断で打ち切り、Creator相談を発生させない."""
+        reason = task.error or "不明"
+        try:
+            self.manager.task_queue.update_status(
+                task.task_id,
+                "failed",
+                result="自律中止（重要度低）",
+                error=f"[abandoned] {reason}",
+            )
+        except Exception:
+            logger.warning("Failed to mark task as abandoned: %s", task.task_id, exc_info=True)
+
+        # Cancel tasks that depend on this task to avoid deadlocks.
+        try:
+            for t in self.manager.task_queue.list_all():
+                if task.task_id not in (t.depends_on or []):
+                    continue
+                if t.status not in ("pending", "running", "paused"):
+                    continue
+                self.manager.task_queue.update_status(
+                    t.task_id,
+                    "canceled",
+                    result="依存中止",
+                    error=f"依存タスク {task.task_id} が自律中止: {reason}",
+                )
+        except Exception:
+            logger.warning("Failed to cancel dependent tasks for %s", task.task_id, exc_info=True)
+
+        # Persist to daily memory (best-effort)
+        try:
+            self.manager.memory_vault.append_daily(
+                f"自律中止: {task.description}\n理由: max_retries到達 / {reason}",
+                title="自律タスク中止",
+                author="autonomous_loop",
+            )
+            mm = getattr(self.manager, "memory_manager", None)
+            if mm is not None:
+                mm.ingest_all_sources()
+        except Exception:
+            logger.warning("Failed to persist abandoned task note", exc_info=True)
 
     def _check_initiative_completion(self, task_id: str) -> None:
         """タスク完了時にイニシアチブの全タスク完了を検知し、振り返りを生成する."""

@@ -9,7 +9,9 @@ services:
       - COMPANY_ID=alpha
       - POLL_INTERVAL=10
     volumes:
-      - ai-company_ai-company-data:/app/data:ro
+      # When ai-company runs on the VPS host (systemd), it writes to /opt/apps/ai-company/data by default.
+      # Override via AI_COMPANY_DATA_DIR if your host path differs.
+      - ${AI_COMPANY_DATA_DIR:-/opt/apps/ai-company/data}:/app/data:ro
     networks:
       - apps-network
     labels:
@@ -18,10 +20,6 @@ services:
       - "traefik.http.routers.ai-company-dashboard.tls=true"
       - "traefik.http.routers.ai-company-dashboard.tls.certresolver=letsencrypt"
       - "traefik.http.services.ai-company-dashboard.loadbalancer.server.port=8000"
-
-volumes:
-  ai-company_ai-company-data:
-    external: true
 
 networks:
   apps-network:

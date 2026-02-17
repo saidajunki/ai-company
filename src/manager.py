@@ -55,6 +55,7 @@ from response_parser import Action, parse_plan_content, parse_response
 from research_note_store import ResearchNoteStore
 from consultation_store import ConsultationStore
 from commitment_store import CommitmentStore
+from consultation_policy import assess_creator_consultation
 from service_registry import ServiceRegistry
 from shell_executor import ShellResult, execute_shell
 from sub_agent_runner import SubAgentRunner
@@ -1519,6 +1520,63 @@ class Manager:
                 elif action.action_type == "consult":
                     logger.info("Consultation requested: %s", action.content[:120])
                     consult_text = action.content.strip()
+                    assessment = assess_creator_consultation(
+                        consult_text,
+                        constitution=self.state.constitution,
+                    )
+
+                    if not assessment.is_major:
+                        logger.info("Treating consultation as minor (reason=%s); proceeding autonomously", assessment.reason)
+                        autonomy_note = (
+                            "（自律方針）以下は重大な意思決定ではないためCreatorには相談しません。\n"
+                            "あなた（CEO AI）が最も安全・低コスト・可逆な選択を仮決定して作業を継続してください。\n"
+                            f"- 相談内容: {consult_text}\n"
+                            "\n"
+                            "制約:\n"
+                            "- 課金/契約/アカウント作成/広告出稿/ドメイン購入など「お金が動く」行為はしない\n"
+                            "- 会社の目的/ビジョン/憲法の変更はしない（必要なら重大事項として別途<consult>）\n"
+                            "- 外部公開は機密/炎上/規約リスクがない範囲で小さく。迷う場合は公開しない\n"
+                            "\n"
+                            "この方針に従い、以降は<consult>を使わず進めてください。"
+                        )
+                        conversation.append({"role": "user", "content": autonomy_note})
+
+                        if self.llm_client is None:
+                            break
+
+                        llm_result = self.llm_client.chat(conversation)
+                        if isinstance(llm_result, LLMError):
+                            logger.error("Follow-up LLM call failed: %s", llm_result.message)
+                            self._slack_send(
+                                f"エラー: LLM再問い合わせに失敗しました — {llm_result.message}",
+                            )
+                            return
+
+                        self.record_llm_call(
+                            provider="openrouter",
+                            model=llm_result.model,
+                            input_tokens=llm_result.input_tokens,
+                            output_tokens=llm_result.output_tokens,
+                            task_id=task_id,
+                        )
+                        conversation.append({"role": "assistant", "content": llm_result.content})
+
+                        try:
+                            self.conversation_memory.append(ConversationEntry(
+                                timestamp=datetime.now(timezone.utc),
+                                role="assistant",
+                                content=llm_result.content,
+                                task_id=task_id,
+                            ))
+                        except Exception:
+                            logger.warning(
+                                "Failed to save assistant follow-up to conversation memory",
+                                exc_info=True,
+                            )
+
+                        next_actions = parse_response(llm_result.content)
+                        break
+
                     try:
                         entry, created = self.consultation_store.ensure_pending(
                             consult_text,

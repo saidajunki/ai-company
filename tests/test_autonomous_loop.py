@@ -302,6 +302,70 @@ class TestExecuteTaskShell:
 
 
 # ---------------------------------------------------------------------------
+# _execute_task — consult gating (autonomy-first)
+# ---------------------------------------------------------------------------
+
+class TestExecuteTaskConsultGating:
+    def test_minor_consult_proceeds_without_creator_consultation(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mock_consult = MagicMock()
+        mock_consult.ensure_pending.return_value = (MagicMock(consultation_id="esc12345"), True)
+        mgr.consultation_store = mock_consult
+
+        mgr.llm_client.chat.side_effect = [
+            LLMResponse(
+                content="<consult>公開先はGitHubで良いですか？</consult>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<done>完了</done>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+        ]
+
+        loop = AutonomousLoop(mgr)
+        task = mgr.task_queue.add("minor consult task")
+
+        with patch.object(mgr, "check_budget", return_value=False):
+            loop._execute_task(task)
+
+        assert mock_consult.ensure_pending.call_count == 0
+        completed = mgr.task_queue.list_by_status("completed")
+        assert len(completed) == 1
+
+    def test_major_consult_creates_consultation_and_stops(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mock_consult = MagicMock()
+        mock_consult.ensure_pending.return_value = (MagicMock(consultation_id="esc12345"), True)
+        mgr.consultation_store = mock_consult
+
+        mgr.llm_client.chat.return_value = LLMResponse(
+            content="<consult>広告出稿に$100使っていいですか？</consult>",
+            input_tokens=50,
+            output_tokens=30,
+            model="test-model",
+            finish_reason="stop",
+        )
+
+        loop = AutonomousLoop(mgr)
+        task = mgr.task_queue.add("major consult task")
+
+        with patch.object(mgr, "check_budget", return_value=False):
+            loop._execute_task(task)
+
+        assert mock_consult.ensure_pending.call_count == 1
+        failed = mgr.task_queue.list_by_status("failed")
+        assert len(failed) == 1
+        assert failed[0].error == "相談待ち"
+
+
+# ---------------------------------------------------------------------------
 # _pick_task
 # ---------------------------------------------------------------------------
 
@@ -575,7 +639,7 @@ class TestRetryFailedTasks:
         mgr.consultation_store = mock_consult
         loop = AutonomousLoop(mgr)
 
-        task = mgr.task_queue.add("doomed task")
+        task = mgr.task_queue.add("doomed task", source="creator")
         mgr.task_queue.update_status(task.task_id, "failed", error="致命的エラー")
         for i in range(3):
             mgr.task_queue.update_status_for_retry(task.task_id, retry_count=i + 1)
@@ -600,7 +664,7 @@ class TestRetryFailedTasks:
         mgr.consultation_store = mock_consult
         loop = AutonomousLoop(mgr)
 
-        task = mgr.task_queue.add("doomed task")
+        task = mgr.task_queue.add("doomed task", source="creator")
         mgr.task_queue.update_status(task.task_id, "failed", error="致命的エラー")
         for i in range(3):
             mgr.task_queue.update_status_for_retry(task.task_id, retry_count=i + 1)
@@ -613,6 +677,27 @@ class TestRetryFailedTasks:
         # 2回目のtickではエスカレーションされない
         loop._retry_failed_tasks()
         assert mock_consult.ensure_pending.call_count == 1  # 変わらない
+
+    def test_abandons_low_priority_task_instead_of_escalating(self, tmp_path: Path):
+        """自律タスクの永久失敗はCreator相談せずabandoned扱いになる."""
+        mgr = _make_manager(tmp_path)
+        mock_consult = MagicMock()
+        mock_consult.ensure_pending.return_value = (MagicMock(consultation_id="esc12345"), True)
+        mock_consult.list_by_status.return_value = []
+        mgr.consultation_store = mock_consult
+        loop = AutonomousLoop(mgr)
+
+        task = mgr.task_queue.add("doomed autonomous task", priority=5, source="autonomous")
+        mgr.task_queue.update_status(task.task_id, "failed", error="永続エラー")
+        for i in range(3):
+            mgr.task_queue.update_status_for_retry(task.task_id, retry_count=i + 1)
+            mgr.task_queue.update_status(task.task_id, "failed", error="永続エラー")
+
+        loop._retry_failed_tasks()
+
+        assert mock_consult.ensure_pending.call_count == 0
+        updated = mgr.task_queue._get_latest(task.task_id)
+        assert updated.error.startswith("[abandoned]")
 
     def test_tick_calls_retry_before_pick(self, tmp_path: Path):
         """tick()が_pick_taskの前に_retry_failed_tasksを呼ぶ."""
