@@ -14,6 +14,9 @@ from models import ConsultationEntry
 from ndjson_store import ndjson_append, ndjson_read
 
 
+MAX_PENDING_CONSULTATIONS = 5
+
+
 class ConsultationStore:
     """相談事項（pending/resolved）の永続化と取得を担当する."""
 
@@ -37,17 +40,30 @@ class ConsultationStore:
     ) -> tuple[ConsultationEntry, bool]:
         """Ensure a pending consultation exists (dedupe identical pending items).
 
+        If the number of pending consultations exceeds MAX_PENDING_CONSULTATIONS,
+        the oldest ones are auto-resolved to make room.
+
         Returns:
             (entry, created) where created=True only when a new pending entry was added.
         """
         normalized = (content or "").strip()
         try:
-            for c in self.list_by_status("pending"):
+            pending = self.list_by_status("pending")
+            for c in pending:
                 if c.related_task_id == related_task_id and (c.content or "").strip() == normalized:
                     return c, False
         except Exception:
-            # Best-effort: if listing fails, fall back to creating a new entry.
-            pass
+            pending = []
+
+        # Auto-resolve oldest consultations if at or over the limit
+        if len(pending) >= MAX_PENDING_CONSULTATIONS:
+            sorted_pending = sorted(pending, key=lambda c: c.created_at)
+            to_resolve = sorted_pending[: len(sorted_pending) - MAX_PENDING_CONSULTATIONS + 1]
+            for old in to_resolve:
+                try:
+                    self.resolve(old.consultation_id, resolution="自動resolve（上限超過）")
+                except Exception:
+                    pass
 
         entry = self.add(normalized, related_task_id=related_task_id)
         return entry, True

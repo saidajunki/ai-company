@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WIP_LIMIT = 3
 MAX_TASK_TURNS = 50
+MAX_PENDING_CONSULTATIONS = 5
 # runningタスクがこの秒数以上updated_atから経過したらstuckとみなす
 STUCK_TASK_TIMEOUT_SECONDS = 1800  # 30分
 
@@ -53,15 +54,17 @@ class AutonomousLoop:
             # 0a. Reap stuck running tasks
             self._reap_stuck_tasks()
 
-            # 0b. If there are pending consultations, pause autonomy to avoid
-            # spamming Slack and making decisions without Creator input.
+            # 0b. If there are too many pending consultations, pause autonomy.
+            # Up to MAX_PENDING_CONSULTATIONS is allowed — the CEO can still
+            # work on tasks that don't require Creator input.
             try:
                 pending = self.manager.consultation_store.list_by_status("pending")
             except Exception:
                 pending = []
-            if pending:
+            if len(pending) > MAX_PENDING_CONSULTATIONS:
                 logger.info(
-                    "Pending consultation(s) exist (%d), pausing autonomous tick", len(pending)
+                    "Too many pending consultations (%d > %d), pausing autonomous tick",
+                    len(pending), MAX_PENDING_CONSULTATIONS,
                 )
                 return
 
