@@ -388,3 +388,15 @@ class TestDelegateFormatSection:
     def test_delegate_model_optional_note(self):
         prompt = _build_prompt()
         assert "model=は省略可能" in prompt
+
+
+class TestLongTermMemorySections:
+    def test_memory_sections_present(self):
+        prompt = _build_prompt(
+            rolling_summary="## 永続メモリ（要約）\n- pinned note",
+            recalled_memories=["- [2025-01-01 00:00:00] (conversation) memory hit"],
+        )
+        assert "## 永続メモリ（要約）" in prompt
+        assert "pinned note" in prompt
+        assert "## 長期記憶（リコール）" in prompt
+        assert "memory hit" in prompt

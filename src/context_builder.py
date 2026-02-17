@@ -48,6 +48,8 @@ def build_system_prompt(
     active_initiatives: list[InitiativeEntry] | None = None,
     strategy_direction: StrategyDirection | None = None,
     model_catalog_text: str | None = None,
+    rolling_summary: str | None = None,
+    recalled_memories: list[str] | None = None,
 ) -> str:
     """コンテキスト情報からシステムプロンプトを構築する."""
     sections: list[str] = [
@@ -80,6 +82,12 @@ def build_system_prompt(
 
     # --- リサーチノート ---
     sections.append(_build_research_section(research_notes))
+
+    # --- 永続メモリ（要約） ---
+    sections.append(_build_rolling_summary_section(rolling_summary))
+
+    # --- 長期記憶（リコール） ---
+    sections.append(_build_memory_recall_section(recalled_memories))
 
     # --- タスク履歴 ---
     sections.append(_build_task_history_section(task_history))
@@ -172,6 +180,27 @@ def _build_strategy_section(
         lines.append("戦略方針未設定")
     else:
         lines.append(strategy_direction.summary)
+    return "\n".join(lines)
+
+def _build_rolling_summary_section(rolling_summary: str | None) -> str:
+    if rolling_summary and rolling_summary.strip():
+        text = rolling_summary.strip()
+        if text.startswith("#"):
+            return text
+        return "\n".join(["## 永続メモリ（要約）", text])
+    return "\n".join(["## 永続メモリ（要約）", "要約なし"])
+
+
+def _build_memory_recall_section(recalled_memories: list[str] | None) -> str:
+    lines = ["## 長期記憶（リコール）"]
+    if not recalled_memories:
+        lines.append("リコールなし")
+        return "\n".join(lines)
+    for it in recalled_memories[:12]:
+        s = (it or "").strip()
+        if not s:
+            continue
+        lines.append(s if s.startswith("-") else f"- {s}")
     return "\n".join(lines)
 
 

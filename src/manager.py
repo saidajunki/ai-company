@@ -62,9 +62,10 @@ from initiative_planner import InitiativePlanner
 from recovery_planner import RecoveryPlanner
 from strategy_analyzer import StrategyAnalyzer
 from model_catalog import build_model_catalog, format_model_catalog_for_prompt
+from memory_manager import MemoryManager
 from web_searcher import WebSearcher
 from task_queue import TaskQueue
-from vision_loader import VisionLoader
+from vision_loader import DEFAULT_VISION, VisionLoader
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,10 @@ def init_company_directory(base_dir: Path, company_id: str) -> None:
     constitution_file = company_root / "constitution.yaml"
     if not constitution_file.exists():
         constitution_save(constitution_file, ConstitutionModel())
+
+    vision_file = company_root / "vision.md"
+    if not vision_file.exists():
+        vision_file.write_text(DEFAULT_VISION.rstrip() + "\n", encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # TaskStep dataclass (Req 5.1, 5.3, 5.4)
@@ -165,6 +170,11 @@ class Manager:
         self.conversation_memory = ConversationMemory(base_dir, company_id)
         self.creator_review_store = CreatorReviewStore(base_dir, company_id)
         self.consultation_store = ConsultationStore(base_dir, company_id)
+        try:
+            self.memory_manager: MemoryManager | None = MemoryManager(base_dir, company_id)
+        except Exception:
+            logger.warning("Failed to initialize memory manager", exc_info=True)
+            self.memory_manager = None
 
         # Autonomous growth components
         self.vision_loader = VisionLoader(base_dir, company_id)
@@ -213,6 +223,13 @@ class Manager:
             self.agent_registry.ensure_ceo(model)
         except Exception:
             logger.warning("Failed to ensure CEO agent registration", exc_info=True)
+
+        # Bootstrap long-term memory (best-effort)
+        try:
+            if self.memory_manager is not None:
+                self.memory_manager.bootstrap()
+        except Exception:
+            logger.warning("Memory bootstrap failed", exc_info=True)
 
         # Determine what to do first after wakeup
         action, description = determine_recovery_action(self.state)
@@ -752,17 +769,19 @@ class Manager:
             # 2. コンテキスト構築
             now = datetime.now(timezone.utc)
 
-            # Save user message to conversation memory (Req 1.1)
+            # Memory recall/summarization (best-effort)
+            rolling_summary_text: str | None = None
+            recalled_memories: list[str] | None = None
             try:
-                self.conversation_memory.append(ConversationEntry(
-                    timestamp=now,
-                    role="user",
-                    content=text,
-                    user_id=user_id,
-                    task_id=task_id,
-                ))
+                if self.memory_manager is not None:
+                    self.memory_manager.ingest_all_sources()
+                    rolling_summary_text = self.memory_manager.summary_for_prompt()
+                    recalled_memories = self.memory_manager.recall_for_prompt(
+                        stripped or text,
+                        limit=8,
+                    )
             except Exception:
-                logger.warning("Failed to save user message to conversation memory", exc_info=True)
+                logger.warning("Failed to build memory context", exc_info=True)
 
             spent = compute_window_cost(self.state.ledger_events, now)
             limit = DEFAULT_BUDGET_LIMIT_USD
@@ -777,6 +796,18 @@ class Manager:
             except Exception:
                 logger.warning("Failed to load conversation history", exc_info=True)
                 conversation_history = None
+
+            # Save user message to conversation memory (Req 1.1)
+            try:
+                self.conversation_memory.append(ConversationEntry(
+                    timestamp=now,
+                    role="user",
+                    content=text,
+                    user_id=user_id,
+                    task_id=task_id,
+                ))
+            except Exception:
+                logger.warning("Failed to save user message to conversation memory", exc_info=True)
 
             # Load vision text (Req 2.1)
             try:
@@ -833,6 +864,8 @@ class Manager:
                 vision_text=vision_text,
                 creator_reviews=creator_reviews,
                 research_notes=research_notes,
+                rolling_summary=rolling_summary_text,
+                recalled_memories=recalled_memories,
                 task_history=task_history,
                 active_initiatives=self._load_active_initiatives(),
                 strategy_direction=self._load_strategy_direction(),
@@ -884,6 +917,41 @@ class Manager:
 
             # 6. アクション実行ループ
             self._execute_action_loop(actions, conversation, task_id)
+
+            # Persist a compact interaction log (best-effort)
+            try:
+                if self.memory_manager is not None:
+                    assistant_msgs = [
+                        m.get("content", "")
+                        for m in conversation
+                        if m.get("role") == "assistant"
+                    ]
+                    response_text = assistant_msgs[-1] if assistant_msgs else ""
+
+                    snapshot_lines = [
+                        f"WIP: {len(self.state.wip)}",
+                    ]
+                    try:
+                        pending_consults = self.consultation_store.list_by_status("pending")
+                        snapshot_lines.append(f"Pending consults: {len(pending_consults)}")
+                    except Exception:
+                        pass
+                    try:
+                        pending_tasks = self.task_queue.list_by_status("pending")
+                        snapshot_lines.append(f"Pending tasks: {len(pending_tasks)}")
+                    except Exception:
+                        pass
+
+                    self.memory_manager.note_interaction(
+                        timestamp=now,
+                        user_id=user_id,
+                        request_text=text,
+                        response_text=response_text,
+                        snapshot_lines=snapshot_lines,
+                    )
+                    self.memory_manager.ingest_all_sources()
+            except Exception:
+                logger.warning("Failed to persist interaction log", exc_info=True)
 
         except Exception:
             logger.exception("Unexpected error in process_message")
@@ -977,6 +1045,20 @@ class Manager:
                     )
                     conversation.append({"role": "assistant", "content": llm_result.content})
 
+                    # Save assistant follow-up to conversation memory
+                    try:
+                        self.conversation_memory.append(ConversationEntry(
+                            timestamp=datetime.now(timezone.utc),
+                            role="assistant",
+                            content=llm_result.content,
+                            task_id=task_id,
+                        ))
+                    except Exception:
+                        logger.warning(
+                            "Failed to save assistant follow-up to conversation memory",
+                            exc_info=True,
+                        )
+
                     next_actions = parse_response(llm_result.content)
                     break  # Process new actions in next iteration
 
@@ -1059,6 +1141,20 @@ class Manager:
                     )
                     conversation.append({"role": "assistant", "content": llm_result.content})
 
+                    # Save assistant follow-up to conversation memory
+                    try:
+                        self.conversation_memory.append(ConversationEntry(
+                            timestamp=datetime.now(timezone.utc),
+                            role="assistant",
+                            content=llm_result.content,
+                            task_id=task_id,
+                        ))
+                    except Exception:
+                        logger.warning(
+                            "Failed to save assistant follow-up to conversation memory",
+                            exc_info=True,
+                        )
+
                     next_actions = parse_response(llm_result.content)
                     break  # Process new actions in next iteration
 
@@ -1124,6 +1220,20 @@ class Manager:
                     )
                     conversation.append({"role": "assistant", "content": llm_result.content})
 
+                    # Save assistant follow-up to conversation memory
+                    try:
+                        self.conversation_memory.append(ConversationEntry(
+                            timestamp=datetime.now(timezone.utc),
+                            role="assistant",
+                            content=llm_result.content,
+                            task_id=task_id,
+                        ))
+                    except Exception:
+                        logger.warning(
+                            "Failed to save assistant follow-up to conversation memory",
+                            exc_info=True,
+                        )
+
                     next_actions = parse_response(llm_result.content)
                     break  # Process new actions in next iteration
 
@@ -1168,6 +1278,20 @@ class Manager:
                         task_id=task_id,
                     )
                     conversation.append({"role": "assistant", "content": llm_result.content})
+
+                    # Save assistant follow-up to conversation memory
+                    try:
+                        self.conversation_memory.append(ConversationEntry(
+                            timestamp=datetime.now(timezone.utc),
+                            role="assistant",
+                            content=llm_result.content,
+                            task_id=task_id,
+                        ))
+                    except Exception:
+                        logger.warning(
+                            "Failed to save assistant follow-up to conversation memory",
+                            exc_info=True,
+                        )
 
                     next_actions = parse_response(llm_result.content)
                     break  # Process new actions in next iteration
