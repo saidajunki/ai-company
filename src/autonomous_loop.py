@@ -315,6 +315,8 @@ class AutonomousLoop:
                 completed=self.manager.task_queue.list_by_status("completed")[-10:],
                 failed=self.manager.task_queue.list_by_status("failed")[-5:],
                 running=self.manager.task_queue.list_by_status("running"),
+                paused=self.manager.task_queue.list_by_status("paused")[-5:],
+                canceled=self.manager.task_queue.list_by_status("canceled")[-5:],
             )
             task_history_text = _build_task_history_section(task_history)
         except Exception:
@@ -337,7 +339,10 @@ class AutonomousLoop:
             "あなたはAI会社の社長AIです。タスクを実行してください。\n"
             "シェルコマンドが必要な場合は<shell>コマンド</shell>で指示してください。\n"
             "Creatorに相談が必要な場合は<consult>相談内容</consult>で送ってください。\n"
-            "社員エージェントに委任する場合は<delegate>role:タスク説明 model=モデル名</delegate>で指示してください（model=は省略可）。\n"
+            "社員エージェントに委任する場合は<delegate>役割名:タスク説明 model=モデル名</delegate>で指示してください（model=は省略可）。\n"
+            "  例: <delegate>researcher:最新のAI市場動向を調査</delegate>\n"
+            "  例: <delegate>writer:調査結果をレポートにまとめる model=gpt-4o</delegate>\n"
+            "  ※「role」という文字列ではなく、researcher/writer/analyst等の具体的な役割名を書いてください。\n"
             "完了したら<done>結果の要約</done>で報告してください。"
         )
         if task_history_text:
@@ -364,6 +369,16 @@ class AutonomousLoop:
                     )
                     self._check_parent_completion(task)
                     self._report(f"タスク中断(予算超過): {task.description}")
+                    return
+
+                # Creator指示などでpaused/canceledに変わった場合は即中断
+                try:
+                    latest = self.manager.task_queue._get_latest(task.task_id)
+                except Exception:
+                    latest = None
+                if latest is not None and latest.status in ("paused", "canceled"):
+                    self._check_parent_completion(task)
+                    self._report(f"タスク中断({latest.status}): {task.description}")
                     return
 
                 result = self.manager.llm_client.chat(messages)
@@ -480,9 +495,13 @@ class AutonomousLoop:
                         role, _, desc = content.partition(":")
                         role = role.strip() or "worker"
                         desc = desc.strip() or content
+                        # Prevent literal "role" from being used as the role name
+                        if role.lower() == "role":
+                            role = "worker"
+                        agent_name = f"{role}-{task.task_id[:8]}"
                         try:
                             sub_result = self.manager.sub_agent_runner.spawn(
-                                name=role,
+                                name=agent_name,
                                 role=role,
                                 task_description=desc,
                                 model=action.model,
