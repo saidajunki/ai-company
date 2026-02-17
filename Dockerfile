@@ -31,7 +31,9 @@ RUN ln -sf /usr/bin/python3 /usr/bin/python
 RUN pip install --no-cache-dir --break-system-packages ".[dev]"
 
 # Create non-root user and data directory with correct ownership
-RUN useradd -m -u 1000 company \
+# Ubuntu base image has a default 'ubuntu' user at UID 1000, remove it first
+RUN userdel -r ubuntu 2>/dev/null || true \
+    && useradd -m -u 1000 company \
     && mkdir -p /etc/sudoers.d \
     && echo "company ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/company \
     && chmod 0440 /etc/sudoers.d/company \
