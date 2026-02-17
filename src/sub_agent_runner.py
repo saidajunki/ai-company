@@ -77,13 +77,19 @@ class SubAgentRunner:
         # Generate agent_id
         agent_id = f"sub-{uuid4().hex[:6]}"
 
+        # Normalize display name: avoid "role role" in dashboards when name==role.
+        display_name = (name or "").strip() or role
+        if display_name.strip().lower() == (role or "").strip().lower():
+            # Keep it human-readable while making it unique.
+            display_name = f"{role}#{agent_id.split('-', 1)[-1]}"
+
         # Create independent LLMClient for this sub-agent
         sub_client = self._create_llm_client(effective_model)
 
         # Register in AgentRegistry with effective model name
         self.manager.agent_registry.register(
             agent_id=agent_id,
-            name=name,
+            name=display_name,
             role=role,
             model=effective_model,
             budget_limit_usd=budget_limit_usd,

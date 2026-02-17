@@ -201,6 +201,18 @@ class TestSpawnFlow:
         ]
         assert len(sub_events) >= 1
 
+    def test_spawn_normalizes_display_name_when_name_equals_role(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mock_sub = _make_mock_llm()
+        runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
+
+        runner.spawn("developer", "developer", "コードを書く")
+
+        sub_agents = [a for a in mgr.agent_registry._list_all() if a.agent_id.startswith("sub-")]
+        assert len(sub_agents) == 1
+        assert sub_agents[0].name != sub_agents[0].role
+
     def test_spawn_deactivates_agent_after_completion(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
         mock_sub = _make_mock_llm()

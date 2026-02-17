@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,10 @@ _INITIATIVE_STATUS_ORDER: dict[str, int] = {
 _DEFAULT_BUDGET_LIMIT_USD = 10.0
 _RECENT_TASKS_LIMIT = 50
 _COST_WINDOW_MINUTES = 60
+
+_DASHBOARD_AGENTS_MAX = int(os.environ.get("DASHBOARD_AGENTS_MAX", "50"))
+_DASHBOARD_INACTIVE_MAX = int(os.environ.get("DASHBOARD_INACTIVE_MAX", "20"))
+_DASHBOARD_INACTIVE_RECENT_HOURS = int(os.environ.get("DASHBOARD_INACTIVE_RECENT_HOURS", "24"))
 
 
 @dataclass
@@ -95,6 +100,7 @@ class DataService:
         agents = resolve_latest(
             read_ndjson(state_dir / "agents.ndjson", AgentEntry), "agent_id"
         )
+        agents = self._filter_agents_for_dashboard(agents)
         initiatives = self._sort_initiatives(
             resolve_latest(
                 read_ndjson(state_dir / "initiatives.ndjson", InitiativeEntry),
@@ -125,6 +131,73 @@ class DataService:
             cost=self._compute_cost(ledger_events),
             conversations=conversations,
         )
+
+    @staticmethod
+    def _filter_agents_for_dashboard(agents: list[AgentEntry]) -> list[AgentEntry]:
+        """Filter/sort agents to keep the dashboard usable even with many historical sub-agents."""
+        if not agents:
+            return []
+
+        now = datetime.now(timezone.utc)
+
+        def _ts(a: AgentEntry) -> datetime:
+            ts = a.updated_at
+            return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+        # Always keep key agents even if limits are exceeded.
+        pinned_ids = {"ceo", "manager"}
+        pinned = [a for a in agents if a.agent_id in pinned_ids]
+
+        active = [a for a in agents if a.status == "active" and a.agent_id not in pinned_ids]
+
+        recent_inactive: list[AgentEntry] = []
+        cutoff_seconds = _DASHBOARD_INACTIVE_RECENT_HOURS * 3600
+        for a in agents:
+            if a.status != "inactive" or a.agent_id in pinned_ids:
+                continue
+            age = (now - _ts(a)).total_seconds()
+            if age <= cutoff_seconds:
+                recent_inactive.append(a)
+
+        # Sort: active first (newest), then inactive (newest)
+        active.sort(key=_ts, reverse=True)
+        recent_inactive.sort(key=_ts, reverse=True)
+        recent_inactive = recent_inactive[: max(0, _DASHBOARD_INACTIVE_MAX)]
+
+        combined = pinned + active + recent_inactive
+
+        # De-dup while preserving order (pinned may overlap).
+        seen: set[str] = set()
+        ordered: list[AgentEntry] = []
+        for a in combined:
+            if a.agent_id in seen:
+                continue
+            seen.add(a.agent_id)
+            ordered.append(a)
+
+        # As a final safety, cap to keep UI responsive (but keep pinned).
+        if _DASHBOARD_AGENTS_MAX <= 0:
+            return ordered
+
+        if len(ordered) <= _DASHBOARD_AGENTS_MAX:
+            return ordered
+
+        keep: list[AgentEntry] = []
+        keep_ids = set()
+        for a in ordered:
+            if a.agent_id in pinned_ids and a.agent_id not in keep_ids:
+                keep.append(a)
+                keep_ids.add(a.agent_id)
+
+        for a in ordered:
+            if a.agent_id in keep_ids:
+                continue
+            if len(keep) >= _DASHBOARD_AGENTS_MAX:
+                break
+            keep.append(a)
+            keep_ids.add(a.agent_id)
+
+        return keep
 
     # ── heartbeat ───────────────────────────────────────────────
 
