@@ -27,6 +27,7 @@ from conversation_memory import ConversationMemory
 from cost_aggregator import compute_window_cost, is_budget_exceeded
 from creator_review_parser import parse_creator_review
 from creator_review_store import CreatorReviewStore
+from creator_directive import CreatorDirective, parse_creator_directive
 from daily_brief_formatter import DailyBriefData, DailyCostSummary, format_daily_brief
 from heartbeat import update_heartbeat, update_heartbeat_on_report
 from llm_client import LLMClient, LLMError, LLMResponse
@@ -565,6 +566,32 @@ class Manager:
         except Exception:
             logger.warning("Failed to get active initiatives for daily brief", exc_info=True)
 
+        paused: list[str] = []
+        try:
+            paused_tasks = self.task_queue.list_by_status("paused")
+            paused_tasks.sort(key=lambda t: t.updated_at, reverse=True)
+            for t in paused_tasks[:7]:
+                reason = (t.error or "").strip()
+                if len(reason) > 60:
+                    reason = reason[:60] + "…"
+                suffix = f" — {reason}" if reason else ""
+                paused.append(f"[{t.task_id}] P{t.priority} {t.description}{suffix}")
+        except Exception:
+            logger.warning("Failed to get paused tasks for daily brief", exc_info=True)
+
+        canceled: list[str] = []
+        try:
+            canceled_tasks = self.task_queue.list_by_status("canceled")
+            canceled_tasks.sort(key=lambda t: t.updated_at, reverse=True)
+            for t in canceled_tasks[:7]:
+                reason = (t.error or "").strip()
+                if len(reason) > 60:
+                    reason = reason[:60] + "…"
+                suffix = f" — {reason}" if reason else ""
+                canceled.append(f"[{t.task_id}] P{t.priority} {t.description}{suffix}")
+        except Exception:
+            logger.warning("Failed to get canceled tasks for daily brief", exc_info=True)
+
         for w in self.state.wip[:3]:
             if w and w not in active:
                 active.append(f"(WIP) {w}")
@@ -652,6 +679,8 @@ class Manager:
             company_id=self.company_id,
             planned_initiatives=planned,
             active_initiatives=active,
+            paused_initiatives=paused,
+            canceled_initiatives=canceled,
             consultations=consultations,
             cost=cost,
             latest_creator_score=latest_review_text,
@@ -726,6 +755,15 @@ class Manager:
         self._slack_reply_thread_ts = slack_thread_ts
         try:
             stripped = (text or "").strip()
+
+            # --- Creator directive (pause/cancel/resume) ---
+            try:
+                directive = parse_creator_directive(stripped, thread_context=slack_thread_context)
+            except Exception:
+                directive = None
+            if directive is not None:
+                if self._apply_creator_directive(directive, user_id=user_id):
+                    return
 
             # --- Fast paths (no LLM required) ---
             if stripped in ("日報", "creator日報", "daily", "daily brief", "daily report"):
@@ -852,10 +890,16 @@ class Manager:
                 failed = self.task_queue.list_by_status("failed")
                 failed.sort(key=lambda t: t.updated_at, reverse=True)
                 running = self.task_queue.list_by_status("running")
+                paused = self.task_queue.list_by_status("paused")
+                paused.sort(key=lambda t: t.updated_at, reverse=True)
+                canceled = self.task_queue.list_by_status("canceled")
+                canceled.sort(key=lambda t: t.updated_at, reverse=True)
                 task_history = TaskHistoryContext(
                     completed=completed[:10],
                     failed=failed[:5],
                     running=running,
+                    paused=paused[:5],
+                    canceled=canceled[:5],
                 )
             except Exception:
                 logger.warning("Failed to load task history", exc_info=True)
@@ -975,6 +1019,127 @@ class Manager:
             self._slack_reply_channel = prev_channel
             self._slack_reply_thread_ts = prev_thread
 
+    def _apply_creator_directive(self, directive: CreatorDirective, *, user_id: str) -> bool:
+        """Apply Creator's pause/cancel/resume instruction to task/initiative state.
+
+        Returns True when handled (even if only an error/help message was sent).
+        """
+        target_task_id = directive.task_id
+        consult_id = directive.consult_id
+
+        # If consult_id exists, resolve it (best-effort) and use related_task_id as fallback.
+        if consult_id:
+            try:
+                latest = self.consultation_store.get_latest(consult_id)
+                if latest and latest.status != "resolved":
+                    self.consultation_store.resolve(consult_id, resolution=directive.raw_text)
+                if target_task_id is None and latest and latest.related_task_id:
+                    target_task_id = latest.related_task_id
+            except Exception:
+                logger.warning("Failed to resolve consultation %s", consult_id, exc_info=True)
+
+        # If task_id is still unknown, try to guess by query text.
+        if target_task_id is None and directive.query:
+            try:
+                q = directive.query
+                candidates = [
+                    t for t in self.task_queue.list_all()
+                    if q in (t.description or "") and t.status in ("pending", "running", "paused", "failed", "canceled")
+                ]
+                candidates.sort(key=lambda t: t.updated_at, reverse=True)
+                if len(candidates) == 1:
+                    target_task_id = candidates[0].task_id
+                elif len(candidates) >= 2:
+                    lines = [
+                        f"- [{t.task_id}] {t.status} P{t.priority} {t.description[:80]}"
+                        for t in candidates[:8]
+                    ]
+                    self._slack_send(
+                        "⚠️ 指示の対象タスクが複数あります。`中止 <task_id>` / `保留 <task_id>` / `再開 <task_id>` のように指定してください。\n"
+                        f"候補:\n" + "\n".join(lines)
+                    )
+                    return True
+            except Exception:
+                logger.warning("Failed to guess target task for directive", exc_info=True)
+
+        if target_task_id is None:
+            self._slack_send(
+                "⚠️ 指示の対象（task_id）が特定できませんでした。スレッド内の `task_id:` を含むメッセージに返信するか、"
+                "`中止 <task_id>` / `保留 <task_id>` / `再開 <task_id>` を送ってください。"
+            )
+            return True
+
+        now = datetime.now(timezone.utc)
+        reason = f"Creator指示: {directive.raw_text}".strip()
+
+        if directive.kind == "cancel":
+            updated = self.task_queue.update_status_tree(
+                target_task_id,
+                "canceled",
+                error=reason,
+                result=None,
+            )
+            self._slack_send(
+                f"🛑 中止しました: [{target_task_id}]（対象{len(updated)}件）"
+            )
+        elif directive.kind == "pause":
+            updated = self.task_queue.update_status_tree(
+                target_task_id,
+                "paused",
+                error=reason,
+                result=None,
+            )
+            self._slack_send(
+                f"⏸️ 保留しました: [{target_task_id}]（対象{len(updated)}件）"
+            )
+        else:  # resume
+            latest = None
+            try:
+                latest = self.task_queue._get_latest(target_task_id)
+            except Exception:
+                latest = None
+            if latest is not None and latest.status == "canceled":
+                self._slack_send(
+                    f"⚠️ 中止済みタスクは再開できません: [{target_task_id}]"
+                )
+                return True
+
+            updated = self.task_queue.update_status_tree(
+                target_task_id,
+                "pending",
+                error=None,
+                result=None,
+                only_statuses={"paused"},
+            )
+            if not updated:
+                self._slack_send(
+                    f"ℹ️ 保留中タスクが見つかりませんでした: [{target_task_id}]"
+                )
+            else:
+                self._slack_send(
+                    f"▶️ 再開しました: [{target_task_id}]（対象{len(updated)}件）"
+                )
+
+        # Persist directive outcome into long-term memory (best-effort)
+        try:
+            mm = getattr(self, "memory_manager", None)
+            if mm is not None:
+                mm.note_interaction(
+                    timestamp=now,
+                    user_id=user_id,
+                    request_text=f"[directive:{directive.kind}] {directive.raw_text}",
+                    response_text=f"applied to task_id={target_task_id}",
+                    snapshot_lines=[
+                        f"task_id: {target_task_id}",
+                        f"consult_id: {consult_id}" if consult_id else "consult_id: n/a",
+                    ],
+                )
+                mm.ingest_all_sources()
+        except Exception:
+            logger.warning("Failed to persist directive outcome", exc_info=True)
+
+        return True
+
     def _load_active_initiatives(self) -> list | None:
         """Load active initiatives (in_progress + planned) for context builder."""
         try:
@@ -1010,6 +1175,21 @@ class Manager:
             for action in actions:
                 if action.action_type == "reply":
                     self._slack_send(action.content)
+
+                elif action.action_type == "control":
+                    logger.info("Control action received: %s", action.content[:120])
+                    for line in action.content.splitlines():
+                        cmd = line.strip()
+                        if not cmd:
+                            continue
+                        try:
+                            directive = parse_creator_directive(cmd, thread_context=None)
+                        except Exception:
+                            directive = None
+                        if directive is None:
+                            self._slack_send(f"⚠️ control形式が不正です: {cmd}")
+                            continue
+                        self._apply_creator_directive(directive, user_id="ceo")
 
                 elif action.action_type == "done":
                     self._slack_send(f"完了: {action.content}")

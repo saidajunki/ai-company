@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from cost_aggregator import compute_window_cost
 from llm_client import LLMClient, LLMError
+from model_catalog import select_model_for_role
 from response_parser import parse_response
 from shell_executor import execute_shell
 
@@ -63,9 +64,14 @@ class SubAgentRunner:
             return msg
 
         # Determine effective model (empty string treated as None)
-        effective_model = model or (
-            self.manager.llm_client.model if self.manager.llm_client else "unknown"
-        )
+        # 1. Explicit model= from delegate tag takes priority
+        # 2. Role-based auto-selection from model_catalog
+        # 3. Fallback to CEO model
+        ceo_model = self.manager.llm_client.model if self.manager.llm_client else "unknown"
+        if model:
+            effective_model = model
+        else:
+            effective_model = select_model_for_role(role, fallback_model=ceo_model)
 
         # Generate agent_id
         agent_id = f"sub-{uuid4().hex[:6]}"
@@ -217,6 +223,7 @@ class SubAgentRunner:
             "",
             "以下のタグを使って応答してください:",
             "<shell>実行するシェルコマンド</shell>",
+            "<research>Web検索クエリ</research>",
             "<reply>報告テキスト</reply>",
             "<done>完了メッセージ</done>",
             "",
@@ -290,6 +297,49 @@ class SubAgentRunner:
                     conversation.append({"role": "user", "content": result_text})
                     needs_followup = True
                     break  # Process shell result in next turn
+                elif action.action_type == "research":
+                    query = action.content.strip()
+                    if not query:
+                        continue
+                    try:
+                        search_results = self.manager.web_searcher.search(query)
+                    except Exception:
+                        logger.warning(
+                            "Sub-agent research failed (agent_id=%s, query=%s)",
+                            agent_id,
+                            query,
+                            exc_info=True,
+                        )
+                        search_results = []
+
+                    now = datetime.now(timezone.utc)
+                    for sr in search_results:
+                        try:
+                            self.manager.research_note_store.save(ResearchNote(
+                                query=query,
+                                source_url=sr.url,
+                                title=sr.title,
+                                snippet=sr.snippet,
+                                summary=sr.snippet,
+                                retrieved_at=now,
+                            ))
+                        except Exception:
+                            logger.warning(
+                                "Failed to save research note from sub-agent",
+                                exc_info=True,
+                            )
+
+                    if search_results:
+                        parts = [f"リサーチ結果 (query={query}):"]
+                        for i, sr in enumerate(search_results, 1):
+                            parts.append(f"{i}. {sr.title}\n   {sr.url}\n   {sr.snippet}")
+                        result_text = "\n".join(parts)
+                    else:
+                        result_text = f"リサーチ結果 (query={query}): 検索結果なし"
+
+                    conversation.append({"role": "user", "content": result_text})
+                    needs_followup = True
+                    break
 
             if done_result is not None:
                 return done_result

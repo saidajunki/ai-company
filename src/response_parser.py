@@ -35,7 +35,17 @@ class PlannedSubtask:
 class Action:
     """LLM応答から抽出されたアクション."""
 
-    action_type: Literal["shell_command", "reply", "done", "research", "publish", "consult", "delegate", "plan"]
+    action_type: Literal[
+        "shell_command",
+        "reply",
+        "done",
+        "research",
+        "publish",
+        "consult",
+        "delegate",
+        "plan",
+        "control",
+    ]
     content: str
     model: str | None = None  # delegateアクション用のモデル指定
 
@@ -44,7 +54,7 @@ class Action:
 # Tag → action_type mapping
 # ---------------------------------------------------------------------------
 
-_TAG_TO_ACTION: dict[str, Literal["shell_command", "reply", "done", "research", "publish", "consult", "delegate", "plan"]] = {
+_TAG_TO_ACTION: dict[str, Literal["shell_command", "reply", "done", "research", "publish", "consult", "delegate", "plan", "control"]] = {
     "shell": "shell_command",
     "reply": "reply",
     "done": "done",
@@ -53,6 +63,7 @@ _TAG_TO_ACTION: dict[str, Literal["shell_command", "reply", "done", "research", 
     "consult": "consult",
     "delegate": "delegate",
     "plan": "plan",
+    "control": "control",
 }
 
 _ACTION_TO_TAG: dict[str, str] = {v: k for k, v in _TAG_TO_ACTION.items()}
@@ -60,7 +71,7 @@ _ACTION_TO_TAG: dict[str, str] = {v: k for k, v in _TAG_TO_ACTION.items()}
 # Regex that matches any of the supported tags and captures inner content.
 # re.DOTALL so '.' matches newlines inside the tag body.
 _TAG_PATTERN = re.compile(
-    r"<(reply|shell|done|research|publish|consult|delegate|plan)>\s*(.*?)\s*</\1>",
+    r"<(reply|shell|done|research|publish|consult|delegate|plan|control)>\s*(.*?)\s*</\1>",
     re.DOTALL,
 )
 

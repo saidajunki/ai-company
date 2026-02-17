@@ -21,10 +21,50 @@ DEFAULT_MODEL_CATEGORIES: dict[str, list[str]] = {
     "anthropic/claude-sonnet": ["coding", "analysis"],
     "google/gemini-2.5-flash": ["fast", "cheap", "general"],
     "google/gemini-2.5-pro": ["coding", "analysis"],
+    "openai/gpt-4.1-mini": ["fast", "cheap", "general"],
+    "openai/gpt-4.1": ["coding", "analysis"],
+    "openai/gpt-4.1-nano": ["fast", "cheap"],
     "openai/gpt-4o-mini": ["fast", "cheap", "general"],
     "openai/gpt-4o": ["coding", "analysis"],
     "deepseek/deepseek-chat": ["coding", "cheap"],
 }
+
+
+# ---------------------------------------------------------------------------
+# Role-based model selection for sub-agents
+# ---------------------------------------------------------------------------
+
+# Maps sub-agent role keywords to preferred model (OpenRouter model ID).
+# If the role matches a keyword, the corresponding model is used instead of
+# falling back to the CEO model.  Order matters: first match wins.
+ROLE_MODEL_MAP: list[tuple[list[str], str]] = [
+    # Research / writing — cheap & fast is fine
+    (["researcher", "research", "調査", "リサーチ"], "openai/gpt-4.1-mini"),
+    (["writer", "ライター", "執筆", "レポート"], "openai/gpt-4.1-mini"),
+    # Coding / engineering — needs stronger model
+    (["coder", "engineer", "developer", "コーダー", "エンジニア", "開発"], "openai/gpt-4.1"),
+    (["analyst", "分析", "アナリスト", "strategist", "戦略"], "openai/gpt-4.1"),
+    # Default worker — cheap
+    (["worker", "assistant", "アシスタント"], "openai/gpt-4.1-mini"),
+]
+
+
+def select_model_for_role(role: str, fallback_model: str) -> str:
+    """ロール名に基づいてサブエージェント用モデルを選択する.
+
+    Args:
+        role: サブエージェントの役割名
+        fallback_model: マッチしなかった場合のフォールバックモデル
+
+    Returns:
+        選択されたモデルID
+    """
+    role_lower = role.lower()
+    for keywords, model_id in ROLE_MODEL_MAP:
+        for kw in keywords:
+            if kw in role_lower:
+                return model_id
+    return fallback_model
 
 
 def _match_categories(

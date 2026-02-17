@@ -32,6 +32,8 @@ class TaskHistoryContext:
     completed: list[TaskEntry] = field(default_factory=list)
     failed: list[TaskEntry] = field(default_factory=list)
     running: list[TaskEntry] = field(default_factory=list)
+    paused: list[TaskEntry] = field(default_factory=list)
+    canceled: list[TaskEntry] = field(default_factory=list)
 
 
 def build_system_prompt(
@@ -225,9 +227,20 @@ def _build_format_section() -> str:
         "Creatorへの返信テキスト",
         "</reply>",
         "",
+        "<research>",
+        "Web検索したいクエリ（例: 最新の○○ / 価格 / 仕様 / 競合事例 / ニュース）",
+        "</research>",
+        "※ 外部情報（最新情報・料金・規約・仕様・ニュース等）が必要/不確かな場合は、まず<research>で確認してください。",
+        "※ 検索結果は後続の入力として渡されるので、それを踏まえて判断・要約・次アクションに進んでください。",
+        "",
         "<shell>",
         "実行するシェルコマンド",
         "</shell>",
+        "",
+        "<publish>",
+        "create_repo:repo_name:description もしくは commit:repo_path:message",
+        "</publish>",
+        "※ 公開が必要な場合に使用（GitHub等のリポジトリ作成/コミット&push）。",
         "",
         "<done>",
         "タスク完了の要約",
@@ -251,7 +264,22 @@ def _build_format_section() -> str:
         "</delegate>",
         "※ model=は省略可能。省略時はデフォルトモデルを使用。",
         "",
+        "<control>",
+        "pause <task_id>: 理由",
+        "cancel <task_id>: 理由",
+        "resume <task_id>",
+        "</control>",
+        "※ タスクの保留/中止/再開など、ステータス変更が必要な場合に使用。",
+        "",
         "タグは複数組み合わせ可能です。タグなしの場合は全体がreplyとして扱われます。",
+        "",
+        "## 重要: 誠実性（虚偽申告禁止）",
+        "- 実際に実行していないことを「した/する」と断言しない。",
+        "- 「保留/中止/再開」などのステータス変更は、反映されたことを確認してから報告する。不明ならCreatorにtask_id/consult_idの提示を求める。",
+        "",
+        "## 重要: 外部情報の扱い（風潮）",
+        "- 「最新/価格/仕様/規約/ニュース」など時間で変わる事実は、推測せず<research>で確認してから話す。",
+        "- 可能な限り日付（published_at/retrieved_at）を添えて解釈し、出典URLを残す。",
     ])
 def _build_model_catalog_section(model_catalog_text: str | None) -> str:
     """利用可能なモデルセクションを構築する."""
@@ -286,6 +314,7 @@ def _build_task_history_section(
     lines = ["## タスク履歴"]
     if task_history is None or (
         not task_history.completed and not task_history.failed and not task_history.running
+        and not task_history.paused and not task_history.canceled
     ):
         lines.append("タスク履歴なし")
         return "\n".join(lines)
@@ -306,6 +335,18 @@ def _build_task_history_section(
         for t in task_history.failed:
             error = _truncate(t.error) if t.error else "原因不明"
             lines.append(f"- [{t.task_id}] {t.description} — エラー: {error}")
+
+    if task_history.paused:
+        lines.append("### 保留中タスク")
+        for t in task_history.paused:
+            note = _truncate(t.error) if t.error else "理由なし"
+            lines.append(f"- [{t.task_id}] {t.description} — 理由: {note}")
+
+    if task_history.canceled:
+        lines.append("### 中止タスク")
+        for t in task_history.canceled:
+            note = _truncate(t.error) if t.error else "理由なし"
+            lines.append(f"- [{t.task_id}] {t.description} — 理由: {note}")
 
     return "\n".join(lines)
 

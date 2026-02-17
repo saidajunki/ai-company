@@ -390,6 +390,20 @@ class TestDelegateFormatSection:
         assert "model=は省略可能" in prompt
 
 
+class TestResearchPublishFormatSection:
+    """Tests for research/publish tag format in 応答フォーマット section."""
+
+    def test_research_tag_in_format(self):
+        prompt = _build_prompt()
+        assert "<research>" in prompt
+        assert "</research>" in prompt
+
+    def test_publish_tag_in_format(self):
+        prompt = _build_prompt()
+        assert "<publish>" in prompt
+        assert "</publish>" in prompt
+
+
 class TestLongTermMemorySections:
     def test_memory_sections_present(self):
         prompt = _build_prompt(

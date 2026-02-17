@@ -26,6 +26,8 @@ class DailyBriefData:
     company_id: str
     planned_initiatives: list[str] = field(default_factory=list)
     active_initiatives: list[str] = field(default_factory=list)
+    paused_initiatives: list[str] = field(default_factory=list)
+    canceled_initiatives: list[str] = field(default_factory=list)
     consultations: list[str] = field(default_factory=list)
     cost: DailyCostSummary = field(
         default_factory=lambda: DailyCostSummary(
@@ -49,6 +51,16 @@ def format_daily_brief(data: DailyBriefData) -> str:
         if data.active_initiatives
         else "- なし"
     )
+    paused_lines = (
+        "\n".join(f"- {s}" for s in data.paused_initiatives)
+        if data.paused_initiatives
+        else "- なし"
+    )
+    canceled_lines = (
+        "\n".join(f"- {s}" for s in data.canceled_initiatives)
+        if data.canceled_initiatives
+        else "- なし"
+    )
     consult_lines = (
         "\n".join(f"- {s}" for s in data.consultations)
         if data.consultations
@@ -69,6 +81,12 @@ def format_daily_brief(data: DailyBriefData) -> str:
 ### 実施している施策（進行中）
 {active_lines}
 
+### 保留中の施策
+{paused_lines}
+
+### 中止した施策
+{canceled_lines}
+
 ### Creatorに対する相談内容
 {consult_lines}
 
@@ -81,4 +99,3 @@ def format_daily_brief(data: DailyBriefData) -> str:
 
 ### Creator返信フォーマット
 {reply_format_block}"""
-

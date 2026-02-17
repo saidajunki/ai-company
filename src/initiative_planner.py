@@ -249,6 +249,7 @@ class InitiativePlanner:
                 status_ja = {
                     "planned": "計画済み",
                     "in_progress": "進行中",
+                    "paused": "保留",
                     "completed": "完了",
                     "abandoned": "中止",
                     "consulting": "相談待ち",

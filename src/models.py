@@ -217,7 +217,7 @@ class TaskEntry(BaseModel):
     description: str
     priority: int = Field(default=3, ge=1, le=5)
     source: Literal["creator", "autonomous", "initiative"] = "autonomous"
-    status: Literal["pending", "running", "completed", "failed"]
+    status: Literal["pending", "running", "paused", "canceled", "completed", "failed"]
     created_at: datetime
     updated_at: datetime
     result: Optional[str] = None
@@ -342,6 +342,7 @@ class InitiativeEntry(BaseModel):
     status: Literal[
         "planned",
         "in_progress",
+        "paused",
         "completed",
         "abandoned",
         "consulting",

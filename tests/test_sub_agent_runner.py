@@ -78,6 +78,7 @@ class TestBuildSubAgentPrompt:
         prompt = runner._build_sub_agent_prompt("dev", "task")
         assert "<done>" in prompt
         assert "<shell>" in prompt
+        assert "<research>" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -383,20 +384,35 @@ class TestModelSelection:
         assert len(sub_agents) == 1
         assert sub_agents[0].model == "google/gemini-2.5-flash"
 
-    def test_spawn_without_model_falls_back_to_ceo_model(self, tmp_path: Path):
+    def test_spawn_without_model_uses_role_based_selection(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
         mock_sub = _make_mock_llm()
         runner = SubAgentRunner(mgr)
         runner._create_llm_client = MagicMock(return_value=mock_sub)
 
+        # "developer" role should auto-select openai/gpt-4.1
         runner.spawn("Worker", "developer", "コードを書く")
+
+        all_agents = mgr.agent_registry._list_all()
+        sub_agents = [a for a in all_agents if a.agent_id.startswith("sub-")]
+        assert len(sub_agents) == 1
+        assert sub_agents[0].model == "openai/gpt-4.1"
+
+    def test_spawn_without_model_unknown_role_falls_back_to_ceo(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mock_sub = _make_mock_llm()
+        runner = SubAgentRunner(mgr)
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
+
+        # Unknown role should fall back to CEO model
+        runner.spawn("Worker", "janitor", "掃除する")
 
         all_agents = mgr.agent_registry._list_all()
         sub_agents = [a for a in all_agents if a.agent_id.startswith("sub-")]
         assert len(sub_agents) == 1
         assert sub_agents[0].model == "test-model"
 
-    def test_spawn_with_empty_string_model_falls_back_to_ceo(self, tmp_path: Path):
+    def test_spawn_with_empty_string_model_uses_role_based_selection(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
         mock_sub = _make_mock_llm()
         runner = SubAgentRunner(mgr)
@@ -407,7 +423,7 @@ class TestModelSelection:
         all_agents = mgr.agent_registry._list_all()
         sub_agents = [a for a in all_agents if a.agent_id.startswith("sub-")]
         assert len(sub_agents) == 1
-        assert sub_agents[0].model == "test-model"
+        assert sub_agents[0].model == "openai/gpt-4.1"
 
     def test_spawn_without_llm_client_uses_unknown_model(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
@@ -419,7 +435,7 @@ class TestModelSelection:
         all_agents = mgr.agent_registry._list_all()
         sub_agents = [a for a in all_agents if a.agent_id.startswith("sub-")]
         assert len(sub_agents) == 1
-        assert sub_agents[0].model == "unknown"
+        assert sub_agents[0].model == "openai/gpt-4.1"
 
     def test_create_llm_client_returns_independent_instance(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)

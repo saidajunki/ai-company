@@ -22,8 +22,24 @@ class TaskQueue:
     def __init__(self, base_dir: Path, company_id: str) -> None:
         self._path = base_dir / "companies" / company_id / "state" / "tasks.ndjson"
 
+    def _find_existing_active(self, description: str) -> TaskEntry | None:
+        """同一descriptionのアクティブタスクがあれば返す（best-effort重複抑止）."""
+        needle = (description or "").strip()
+        if not needle:
+            return None
+        active_statuses = {"pending", "running", "paused", "canceled"}
+        for t in self.list_all():
+            if (t.description or "").strip() == needle and t.status in active_statuses:
+                return t
+        return None
+
     def add(self, description: str, priority: int = 3, agent_id: str = "ceo", source: str = "autonomous") -> TaskEntry:
         """新しいタスクを追加する. Returns the created TaskEntry."""
+        if source != "creator":
+            existing = self._find_existing_active(description)
+            if existing is not None:
+                return existing
+
         now = datetime.now(timezone.utc)
         entry = TaskEntry(
             task_id=uuid4().hex[:8],
@@ -47,6 +63,11 @@ class TaskQueue:
         source: str = "autonomous",
     ) -> TaskEntry:
         """新しいタスクを依存関係・親タスクID付きで追加する."""
+        if source != "creator":
+            existing = self._find_existing_active(description)
+            if existing is not None:
+                return existing
+
         now = datetime.now(timezone.utc)
         entry = TaskEntry(
             task_id=uuid4().hex[:8],
@@ -135,6 +156,58 @@ class TaskQueue:
         })
         ndjson_append(self._path, updated)
 
+    def update_status_tree(
+        self,
+        root_task_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+        result: str | None = None,
+        only_statuses: set[str] | None = None,
+    ) -> list[str]:
+        """親タスク + その配下（parent_task_id）をまとめてステータス更新する.
+
+        Returns:
+            更新したtask_id一覧（存在しないものは除外）
+        """
+        tasks = self.list_all()
+        by_id: dict[str, TaskEntry] = {t.task_id: t for t in tasks}
+        children: dict[str, list[str]] = {}
+        for t in tasks:
+            if t.parent_task_id:
+                children.setdefault(t.parent_task_id, []).append(t.task_id)
+
+        # BFS to collect descendants
+        queue: list[str] = [root_task_id]
+        ordered: list[str] = []
+        seen: set[str] = set()
+        while queue:
+            tid = queue.pop(0)
+            if tid in seen:
+                continue
+            seen.add(tid)
+            ordered.append(tid)
+            queue.extend(children.get(tid, []))
+
+        updated_ids: list[str] = []
+        now = datetime.now(timezone.utc)
+        effective_only = only_statuses or {"pending", "running", "paused", "canceled", "failed"}
+        for tid in ordered:
+            current = by_id.get(tid)
+            if current is None:
+                continue
+            if current.status not in effective_only:
+                continue
+            updated = current.model_copy(update={
+                "status": status,
+                "updated_at": now,
+                "result": result,
+                "error": error,
+            })
+            ndjson_append(self._path, updated)
+            updated_ids.append(tid)
+
+        return updated_ids
 
     def _get_latest(self, task_id: str) -> TaskEntry | None:
         """task_idの最新エントリを返す."""

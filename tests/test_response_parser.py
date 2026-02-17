@@ -120,6 +120,7 @@ class TestPlanTag:
         assert len(actions) == 1
         assert actions[0].action_type == "plan"
         assert "サブタスク1" in actions[0].content
+        assert "サブタスク2" in actions[0].content
 
     def test_parse_plan_with_whitespace(self):
         text = "<plan>  trimmed content  </plan>"
@@ -157,6 +158,29 @@ class TestPlanTag:
         assert len(actions) == 2
         assert actions[0].action_type == "reply"
         assert actions[1].action_type == "plan"
+
+
+# ---------------------------------------------------------------------------
+# control タグ
+# ---------------------------------------------------------------------------
+
+class TestControlTag:
+    """<control> タグの解析テスト."""
+
+    def test_parse_control_tag(self):
+        text = "<control>pause 1234abcd: 一旦保留</control>"
+        actions = parse_response(text)
+        assert len(actions) == 1
+        assert actions[0].action_type == "control"
+        assert "pause 1234abcd" in actions[0].content
+
+    def test_format_control_roundtrip(self):
+        original = [Action(action_type="control", content="cancel 1234abcd: 中止")]
+        formatted = format_actions(original)
+        assert "<control>" in formatted
+        assert "</control>" in formatted
+        reparsed = parse_response(formatted)
+        assert reparsed == original
 
 
 # ---------------------------------------------------------------------------
