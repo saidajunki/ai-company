@@ -1,11 +1,22 @@
-FROM python:3.12-slim
+FROM ubuntu:latest
 
+ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install Python 3.12 + common system tools
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
     curl \
+    wget \
+    git \
     sudo \
+    jq \
+    dnsutils \
+    net-tools \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project files
@@ -13,8 +24,11 @@ COPY pyproject.toml .
 COPY src/ src/
 COPY tests/ tests/
 
+# Make python3 available as python
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+
 # Install Python dependencies
-RUN pip install --no-cache-dir ".[dev]"
+RUN pip install --no-cache-dir --break-system-packages ".[dev]"
 
 # Create non-root user and data directory with correct ownership
 RUN useradd -m -u 1000 company \

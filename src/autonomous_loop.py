@@ -53,6 +53,18 @@ class AutonomousLoop:
             # 0a. Reap stuck running tasks
             self._reap_stuck_tasks()
 
+            # 0b. If there are pending consultations, pause autonomy to avoid
+            # spamming Slack and making decisions without Creator input.
+            try:
+                pending = self.manager.consultation_store.list_by_status("pending")
+            except Exception:
+                pending = []
+            if pending:
+                logger.info(
+                    "Pending consultation(s) exist (%d), pausing autonomous tick", len(pending)
+                )
+                return
+
             # 0b. Retry failed tasks
             self._retry_failed_tasks()
 
@@ -343,6 +355,7 @@ class AutonomousLoop:
 
         try:
             shell_tracker = ShellCommandTracker()
+            artifact_fix_attempts = 0
             for _turn in range(MAX_TASK_TURNS):
                 # Budget check each turn
                 if self.manager.check_budget():
@@ -360,6 +373,32 @@ class AutonomousLoop:
                         task.task_id, "failed", error=result.message
                     )
                     self._check_parent_completion(task)
+                    # If the LLM itself is unavailable (e.g., key limit exceeded),
+                    # stop autonomy and consult Creator once.
+                    if (
+                        result.status_code in (401, 403)
+                        or "Key limit exceeded" in (result.message or "")
+                        or "weekly limit" in (result.message or "")
+                    ):
+                        consult_text = (
+                            "OpenRouterのLLM APIが利用できない可能性が高いため、自律タスクを一時停止します。\n"
+                            f"- エラー: {result.message}\n"
+                            "対応案:\n"
+                            "1) OpenRouterのキー/上限を確認・更新\n"
+                            "2) 代替モデル/プロバイダに切替\n"
+                            "3) しばらく自律実行を停止（相談解決後に再開）\n"
+                        )
+                        try:
+                            entry, created = self.manager.consultation_store.ensure_pending(
+                                consult_text,
+                                related_task_id="system:llm",
+                            )
+                            if created:
+                                self._report(
+                                    f"🚨 エスカレーション [consult_id: {entry.consultation_id}]\n\n{consult_text}"
+                                )
+                        except Exception:
+                            logger.warning("Failed to create LLM availability consultation", exc_info=True)
                     self._report(f"タスク失敗(LLMエラー): {task.description}")
                     return
 
@@ -485,14 +524,28 @@ class AutonomousLoop:
 
                     # Step 2: Artifact verification (Req 3.1, 3.2, 3.3)
                     artifact_verifier = ArtifactVerifier(work_dir)
-                    all_text = done_result + "\n" + "\n".join(
-                        m.get("content", "") for m in messages
-                    )
-                    artifact_paths = artifact_verifier.extract_file_paths(all_text)
+                    artifact_paths = artifact_verifier.extract_file_paths(done_result)
                     if artifact_paths:
                         artifact_result = artifact_verifier.verify(artifact_paths)
                         if not artifact_result.all_exist:
-                            error_msg = "成果物が見つかりません: " + ", ".join(artifact_result.missing)
+                            missing = ", ".join(artifact_result.missing)
+                            if artifact_fix_attempts < 2:
+                                artifact_fix_attempts += 1
+                                messages.append({
+                                    "role": "user",
+                                    "content": (
+                                        "成果物検証に失敗しました。<done>内で言及された以下のパスが存在しません:\n"
+                                        f"{missing}\n\n"
+                                        f"作業ディレクトリ: {work_dir}\n"
+                                        "対応してください:\n"
+                                        "1) 必要な成果物なら、<shell>で作成/修正し、作成後に `ls -la` や `test -f` で存在確認\n"
+                                        "2) 不要なパス/例示/予定の記述なら、<done>から削除して実在する成果物のみ記載\n"
+                                        "完了したら改めて<done>で報告してください。"
+                                    ),
+                                })
+                                continue
+
+                            error_msg = "成果物が見つかりません: " + missing
                             self.manager.task_queue.update_status(
                                 task.task_id, "failed", error=error_msg
                             )
