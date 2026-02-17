@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # AI Company VPS Deployment Script
-# Deploys the ai-company container to VPS
+# Deploys the ai-company service directly on VPS (systemd)
 
 set -e
 
@@ -15,7 +15,7 @@ echo "   App Path: $APP_PATH"
 echo "   Service: $SERVICE_NAME"
 echo ""
 
-# Step 1: Clone or pull repository
+# Step 1: Pull latest code
 echo "📦 Step 1: Syncing repository on VPS..."
 ssh "$VPS_HOST" bash << 'DEPLOY_SCRIPT'
   APP_PATH="/opt/apps/ai-company"
@@ -32,44 +32,50 @@ ssh "$VPS_HOST" bash << 'DEPLOY_SCRIPT'
 DEPLOY_SCRIPT
 
 # Step 2: Set up environment variables
-echo "🔑 Step 2: Setting up environment variables..."
+echo "🔑 Step 2: Checking environment variables..."
 ssh "$VPS_HOST" bash << 'DEPLOY_SCRIPT'
   APP_PATH="/opt/apps/ai-company"
   cd "$APP_PATH"
-  # Create .env if it doesn't exist (tokens must be set manually or via this script)
   if [ ! -f .env ]; then
-    echo "   ⚠ .env file not found – creating placeholder"
-    echo "SLACK_APP_TOKEN=" > .env
-    echo "SLACK_BOT_TOKEN=" >> .env
-    echo "   Please set SLACK_APP_TOKEN and SLACK_BOT_TOKEN in $APP_PATH/.env"
+    if [ -f .env.template ]; then
+      echo "   ⚠ .env not found — creating from template"
+      cp .env.template .env
+      chmod 600 .env
+      echo "   Please set secrets in $APP_PATH/.env"
+    else
+      echo "   ⚠ .env and .env.template not found"
+    fi
   else
     echo "   ✓ .env file exists"
   fi
 DEPLOY_SCRIPT
 
-# Step 3: Build and run container
-echo "🐳 Step 3: Building and starting Docker container..."
+# Step 3: Update dependencies and restart service
+echo "🔄 Step 3: Updating dependencies and restarting service..."
 ssh "$VPS_HOST" bash << 'DEPLOY_SCRIPT'
   APP_PATH="/opt/apps/ai-company"
   cd "$APP_PATH"
-  docker compose build
-  docker compose up -d
-  echo "   ✓ Container started"
+  .venv/bin/pip install -q "."
+  systemctl restart ai-company
+  echo "   ✓ Service restarted"
 DEPLOY_SCRIPT
 
-# Step 4: Wait and verify
+# Step 4: Verify
 echo "⏳ Step 4: Verifying..."
 sleep 3
 
 ssh "$VPS_HOST" bash << 'DEPLOY_SCRIPT'
-  docker ps -a | grep ai-company || echo "   ⚠ Container not found in docker ps"
-  echo ""
-  echo "   Checking logs..."
-  docker logs ai-company --tail 20 2>&1 || true
+  if systemctl is-active --quiet ai-company; then
+    echo "   ✓ ai-company service is running"
+  else
+    echo "   ⚠ ai-company service is NOT running"
+    journalctl -u ai-company --no-pager -n 10
+  fi
 DEPLOY_SCRIPT
 
 echo ""
 echo "✨ Deployment complete!"
 echo ""
 echo "To check status:"
-echo "   ssh $VPS_HOST 'docker logs ai-company'"
+echo "   ssh $VPS_HOST 'systemctl status ai-company'"
+echo "   ssh $VPS_HOST 'journalctl -u ai-company -f'"

@@ -31,5 +31,7 @@ jobs:
           script: |
             cd /opt/apps/ai-company
             git pull origin main
-            docker compose build
-            docker compose up -d
+            .venv/bin/pip install -q "."
+            systemctl restart ai-company
+            sleep 3
+            systemctl is-active ai-company

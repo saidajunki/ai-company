@@ -1,0 +1,24 @@
+[Unit]
+Description=AI Company Manager
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/apps/ai-company
+EnvironmentFile=/opt/apps/ai-company/.env
+ExecStart=/opt/apps/ai-company/.venv/bin/python -m supervisor
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-company
+
+# プロセス管理
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

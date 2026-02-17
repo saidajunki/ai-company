@@ -34,7 +34,7 @@ log = logging.getLogger("ai-company")
 
 # Configuration via environment variables
 COMPANY_ID = os.environ.get("COMPANY_ID", "alpha")
-BASE_DIR = Path(os.environ.get("BASE_DIR", "/app/data"))
+BASE_DIR = Path(os.environ.get("BASE_DIR", "/opt/apps/ai-company/data"))
 HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", "180"))  # 3 min
 REPORT_INTERVAL = int(os.environ.get("REPORT_INTERVAL", "600"))  # 10 min
 DAILY_BRIEF_INTERVAL = int(os.environ.get("DAILY_BRIEF_INTERVAL", "0"))  # disabled by default
