@@ -79,6 +79,7 @@ class TestBuildSubAgentPrompt:
         assert "<done>" in prompt
         assert "<shell>" in prompt
         assert "<research>" in prompt
+        assert "<memory>" in prompt
 
 
 # ---------------------------------------------------------------------------

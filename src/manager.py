@@ -54,6 +54,7 @@ from report_formatter import CostSummary, ReportData, format_report
 from response_parser import Action, parse_plan_content, parse_response
 from research_note_store import ResearchNoteStore
 from consultation_store import ConsultationStore
+from commitment_store import CommitmentStore
 from service_registry import ServiceRegistry
 from shell_executor import ShellResult, execute_shell
 from sub_agent_runner import SubAgentRunner
@@ -64,6 +65,7 @@ from recovery_planner import RecoveryPlanner
 from strategy_analyzer import StrategyAnalyzer
 from model_catalog import build_model_catalog, format_model_catalog_for_prompt
 from memory_manager import MemoryManager
+from memory_vault import DEFAULT_CURATED_MEMORY, curated_memory_path, MemoryVault
 from web_searcher import WebSearcher
 from task_queue import TaskQueue
 from vision_loader import DEFAULT_VISION, VisionLoader
@@ -80,6 +82,7 @@ _SUBDIRS = [
     "decisions",
     "state",
     "pricing",
+    "knowledge",
     "templates",
     "schemas",
     "protocols",
@@ -113,6 +116,12 @@ def init_company_directory(base_dir: Path, company_id: str) -> None:
     vision_file = company_root / "vision.md"
     if not vision_file.exists():
         vision_file.write_text(DEFAULT_VISION.rstrip() + "\n", encoding="utf-8")
+
+    # Curated memory (file-first LTM)
+    mem_path = curated_memory_path(base_dir, company_id)
+    if not mem_path.exists():
+        mem_path.parent.mkdir(parents=True, exist_ok=True)
+        mem_path.write_text(DEFAULT_CURATED_MEMORY.rstrip() + "\n", encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # TaskStep dataclass (Req 5.1, 5.3, 5.4)
@@ -173,6 +182,8 @@ class Manager:
         self.conversation_memory = ConversationMemory(base_dir, company_id)
         self.creator_review_store = CreatorReviewStore(base_dir, company_id)
         self.consultation_store = ConsultationStore(base_dir, company_id)
+        self.commitment_store = CommitmentStore(base_dir, company_id)
+        self.memory_vault = MemoryVault(base_dir, company_id)
         try:
             self.memory_manager: MemoryManager | None = MemoryManager(base_dir, company_id)
         except Exception:
@@ -233,6 +244,12 @@ class Manager:
                 self.memory_manager.bootstrap()
         except Exception:
             logger.warning("Memory bootstrap failed", exc_info=True)
+
+        # Ensure curated memory file exists (file-first LTM)
+        try:
+            self.memory_vault.ensure_initialized()
+        except Exception:
+            logger.warning("Failed to initialize memory vault", exc_info=True)
 
         # Determine what to do first after wakeup
         action, description = determine_recovery_action(self.state)
@@ -868,6 +885,22 @@ class Manager:
                 logger.warning("Failed to load vision", exc_info=True)
                 vision_text = None
 
+            # Load curated memory tail (file-first LTM)
+            curated_memory_text = None
+            try:
+                curated_memory_text = self.memory_vault.load_tail(tail_chars=6000)
+            except Exception:
+                logger.warning("Failed to load curated memory", exc_info=True)
+                curated_memory_text = None
+
+            # Load daily memory tail (append-only daily memo)
+            daily_memory_text = None
+            try:
+                daily_memory_text = self.memory_vault.load_daily_tail(tail_chars=3000)
+            except Exception:
+                logger.warning("Failed to load daily memory", exc_info=True)
+                daily_memory_text = None
+
             # Load recent research notes
             try:
                 research_notes = self.research_note_store.recent()
@@ -904,6 +937,14 @@ class Manager:
             except Exception:
                 logger.warning("Failed to load task history", exc_info=True)
 
+            # Load open commitments (promises/TODOs)
+            open_commitments = None
+            try:
+                open_commitments = self.commitment_store.list_by_status("open")
+            except Exception:
+                logger.warning("Failed to load open commitments", exc_info=True)
+                open_commitments = None
+
             # モデルカタログ生成
             model_catalog_text = None
             try:
@@ -920,6 +961,8 @@ class Manager:
                 budget_limit=limit,
                 conversation_history=conversation_history,
                 vision_text=vision_text,
+                curated_memory_text=curated_memory_text,
+                daily_memory_text=daily_memory_text,
                 creator_reviews=creator_reviews,
                 research_notes=research_notes,
                 rolling_summary=rolling_summary_text,
@@ -929,6 +972,7 @@ class Manager:
                 active_initiatives=self._load_active_initiatives(),
                 strategy_direction=self._load_strategy_direction(),
                 model_catalog_text=model_catalog_text,
+                open_commitments=open_commitments,
             )
 
             conversation: list[dict[str, str]] = [
@@ -1190,6 +1234,218 @@ class Manager:
                             self._slack_send(f"⚠️ control形式が不正です: {cmd}")
                             continue
                         self._apply_creator_directive(directive, user_id="ceo")
+
+                elif action.action_type == "memory":
+                    logger.info("Memory action received: %s", action.content[:120])
+                    raw = (action.content or "").strip()
+                    if not raw:
+                        continue
+
+                    import re
+
+                    first, *rest = raw.splitlines()
+                    m = re.match(r"^(curated|daily|pin)\s*[:：]?\s*(.*)$", first.strip(), re.IGNORECASE)
+                    if m:
+                        op = m.group(1).lower()
+                        head = (m.group(2) or "").strip()
+                        tail = "\n".join(rest).strip() if rest else ""
+                        payload = (head + ("\n" + tail if tail else "")).strip()
+                    else:
+                        op = "daily"
+                        payload = raw
+
+                    def _split_title_body(text: str) -> tuple[str | None, str]:
+                        s = (text or "").strip()
+                        if not s:
+                            return None, ""
+                        lines = s.splitlines()
+                        if (
+                            len(lines) >= 2
+                            and lines[0].strip()
+                            and len(lines[0].strip()) <= 80
+                            and not lines[0].lstrip().startswith(("-", "*", "#"))
+                        ):
+                            title = lines[0].strip()
+                            body = "\n".join(lines[1:]).strip()
+                            return (title if body else None), (body or title)
+                        return None, s
+
+                    try:
+                        if op == "pin":
+                            doc_id = None
+                            if self.memory_manager is not None:
+                                doc_id = self.memory_manager.pin(payload)
+                                self.memory_manager.ingest_all_sources()
+                            result_text = f"メモリ保存: pin OK ({doc_id or 'no-index'})"
+                        elif op == "curated":
+                            title, body = _split_title_body(payload)
+                            self.memory_vault.append(body, title=title, author="ceo")
+                            if self.memory_manager is not None:
+                                self.memory_manager.ingest_all_sources()
+                            result_text = "メモリ保存: curated OK"
+                        else:
+                            title, body = _split_title_body(payload)
+                            self.memory_vault.append_daily(body, title=title, author="ceo")
+                            if self.memory_manager is not None:
+                                self.memory_manager.ingest_all_sources()
+                            result_text = "メモリ保存: daily OK"
+                    except Exception as exc:
+                        logger.warning("Memory action failed: %s", exc, exc_info=True)
+                        result_text = f"メモリ保存エラー: {exc}"
+
+                    conversation.append({"role": "user", "content": result_text})
+
+                    if self.llm_client is None:
+                        break
+
+                    llm_result = self.llm_client.chat(conversation)
+                    if isinstance(llm_result, LLMError):
+                        logger.error("Follow-up LLM call failed: %s", llm_result.message)
+                        self._slack_send(
+                            f"エラー: LLM再問い合わせに失敗しました — {llm_result.message}",
+                        )
+                        return
+
+                    self.record_llm_call(
+                        provider="openrouter",
+                        model=llm_result.model,
+                        input_tokens=llm_result.input_tokens,
+                        output_tokens=llm_result.output_tokens,
+                        task_id=task_id,
+                    )
+                    conversation.append({"role": "assistant", "content": llm_result.content})
+                    try:
+                        self.conversation_memory.append(ConversationEntry(
+                            timestamp=datetime.now(timezone.utc),
+                            role="assistant",
+                            content=llm_result.content,
+                            task_id=task_id,
+                        ))
+                    except Exception:
+                        logger.warning(
+                            "Failed to save assistant follow-up to conversation memory",
+                            exc_info=True,
+                        )
+
+                    next_actions = parse_response(llm_result.content)
+                    break
+
+                elif action.action_type == "commitment":
+                    logger.info("Commitment action received: %s", action.content[:120])
+                    raw = (action.content or "").strip()
+                    if not raw:
+                        continue
+
+                    import re
+                    from datetime import date
+
+                    first, *rest = raw.splitlines()
+                    first = first.strip()
+
+                    result_text = ""
+                    try:
+                        m_close = re.match(
+                            r"^(close|done|cancel|canceled)\s+([0-9a-f]{8})(?:\s*[:：]\s*(.*))?$",
+                            first,
+                            re.IGNORECASE,
+                        )
+                        if m_close:
+                            cmd = m_close.group(1).lower()
+                            cid = m_close.group(2)
+                            note = (m_close.group(3) or "").strip()
+                            if not note and rest:
+                                note = "\n".join(rest).strip()
+                            status = "done" if cmd in ("close", "done") else "canceled"
+                            updated = self.commitment_store.close(cid, note=note, status=status)
+                            if self.memory_manager is not None:
+                                self.memory_manager.ingest_all_sources()
+                            result_text = f"commitment {status}: {updated.commitment_id}"
+                        else:
+                            m_add = re.match(r"^(add|open)\s*[:：]?\s*(.*)$", first, re.IGNORECASE)
+                            if m_add:
+                                head = (m_add.group(2) or "").strip()
+                                payload = (head + ("\n" + "\n".join(rest) if rest else "")).strip()
+                            else:
+                                payload = raw
+
+                            # Extract due=YYYY-MM-DD (optional)
+                            due_date = None
+                            m_due = re.search(r"\bdue\s*=\s*(\d{4}-\d{2}-\d{2})\b", payload)
+                            if m_due:
+                                try:
+                                    due_date = date.fromisoformat(m_due.group(1))
+                                except Exception:
+                                    due_date = None
+                                payload = re.sub(r"\bdue\s*=\s*\d{4}-\d{2}-\d{2}\b", "", payload).strip()
+
+                            def _split_title_body(text: str) -> tuple[str, str]:
+                                s = (text or "").strip()
+                                if not s:
+                                    return "", ""
+                                lines = s.splitlines()
+                                if (
+                                    len(lines) >= 2
+                                    and lines[0].strip()
+                                    and len(lines[0].strip()) <= 80
+                                    and not lines[0].lstrip().startswith(("-", "*", "#"))
+                                ):
+                                    title = lines[0].strip()
+                                    body = "\n".join(lines[1:]).strip()
+                                    return title, (body or title)
+                                return "", s
+
+                            title, body = _split_title_body(payload)
+                            entry, created = self.commitment_store.ensure_open(
+                                body,
+                                title=title,
+                                owner="ceo",
+                                due_date=due_date,
+                                related_task_id=task_id,
+                            )
+                            if self.memory_manager is not None:
+                                self.memory_manager.ingest_all_sources()
+                            verb = "created" if created else "exists"
+                            result_text = f"commitment {verb}: {entry.commitment_id}"
+                    except Exception as exc:
+                        logger.warning("Commitment action failed: %s", exc, exc_info=True)
+                        result_text = f"commitment error: {exc}"
+
+                    conversation.append({"role": "user", "content": result_text})
+
+                    if self.llm_client is None:
+                        break
+
+                    llm_result = self.llm_client.chat(conversation)
+                    if isinstance(llm_result, LLMError):
+                        logger.error("Follow-up LLM call failed: %s", llm_result.message)
+                        self._slack_send(
+                            f"エラー: LLM再問い合わせに失敗しました — {llm_result.message}",
+                        )
+                        return
+
+                    self.record_llm_call(
+                        provider="openrouter",
+                        model=llm_result.model,
+                        input_tokens=llm_result.input_tokens,
+                        output_tokens=llm_result.output_tokens,
+                        task_id=task_id,
+                    )
+                    conversation.append({"role": "assistant", "content": llm_result.content})
+                    try:
+                        self.conversation_memory.append(ConversationEntry(
+                            timestamp=datetime.now(timezone.utc),
+                            role="assistant",
+                            content=llm_result.content,
+                            task_id=task_id,
+                        ))
+                    except Exception:
+                        logger.warning(
+                            "Failed to save assistant follow-up to conversation memory",
+                            exc_info=True,
+                        )
+
+                    next_actions = parse_response(llm_result.content)
+                    break
 
                 elif action.action_type == "done":
                     self._slack_send(f"完了: {action.content}")

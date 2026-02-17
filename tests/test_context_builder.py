@@ -403,6 +403,16 @@ class TestResearchPublishFormatSection:
         assert "<publish>" in prompt
         assert "</publish>" in prompt
 
+    def test_memory_tag_in_format(self):
+        prompt = _build_prompt()
+        assert "<memory>" in prompt
+        assert "</memory>" in prompt
+
+    def test_commitment_tag_in_format(self):
+        prompt = _build_prompt()
+        assert "<commitment>" in prompt
+        assert "</commitment>" in prompt
+
 
 class TestLongTermMemorySections:
     def test_memory_sections_present(self):

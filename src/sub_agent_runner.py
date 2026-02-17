@@ -203,8 +203,10 @@ class SubAgentRunner:
             "## 社内ナレッジ参照先",
             f"- {company_root / 'constitution.yaml'}",
             f"- {company_root / 'vision.md'}",
+            f"- {company_root / 'knowledge' / 'MEMORY.md'}",
             f"- {company_root / 'state' / 'rolling_summary.md'}",
             f"- {company_root / 'state' / 'memory.sqlite3'}",
+            f"- {company_root / 'state' / 'commitments.ndjson'}",
             f"- {company_root / 'journal'}",
             "必要に応じて<shell>でファイル参照して構いません。",
         ]
@@ -225,6 +227,7 @@ class SubAgentRunner:
             "以下のタグを使って応答してください:",
             "<shell>実行するシェルコマンド</shell>",
             "<research>Web検索クエリ</research>",
+            "<memory>社内メモリに残す内容</memory>",
             "<reply>報告テキスト</reply>",
             "<done>完了メッセージ</done>",
             "",
@@ -337,6 +340,68 @@ class SubAgentRunner:
                         result_text = "\n".join(parts)
                     else:
                         result_text = f"リサーチ結果 (query={query}): 検索結果なし"
+
+                    conversation.append({"role": "user", "content": result_text})
+                    needs_followup = True
+                    break
+                elif action.action_type == "memory":
+                    raw = (action.content or "").strip()
+                    if not raw:
+                        continue
+                    import re
+
+                    first, *rest = raw.splitlines()
+                    m = re.match(r"^(curated|daily|pin)\s*[:：]?\s*(.*)$", first.strip(), re.IGNORECASE)
+                    if m:
+                        op = m.group(1).lower()
+                        head = (m.group(2) or "").strip()
+                        tail = "\n".join(rest).strip() if rest else ""
+                        payload = (head + ("\n" + tail if tail else "")).strip()
+                    else:
+                        op = "daily"
+                        payload = raw
+
+                    def _split_title_body(text: str) -> tuple[str | None, str]:
+                        s = (text or "").strip()
+                        if not s:
+                            return None, ""
+                        lines = s.splitlines()
+                        if (
+                            len(lines) >= 2
+                            and lines[0].strip()
+                            and len(lines[0].strip()) <= 80
+                            and not lines[0].lstrip().startswith(("-", "*", "#"))
+                        ):
+                            title = lines[0].strip()
+                            body = "\n".join(lines[1:]).strip()
+                            return (title if body else None), (body or title)
+                        return None, s
+
+                    try:
+                        if op == "pin":
+                            doc_id = None
+                            mm = getattr(self.manager, "memory_manager", None)
+                            if mm is not None:
+                                doc_id = mm.pin(payload)
+                                mm.ingest_all_sources()
+                            result_text = f"メモリ保存: pin OK ({doc_id or 'no-index'})"
+                        elif op == "curated":
+                            title, body = _split_title_body(payload)
+                            self.manager.memory_vault.append(body, title=title, author=agent_id)
+                            mm = getattr(self.manager, "memory_manager", None)
+                            if mm is not None:
+                                mm.ingest_all_sources()
+                            result_text = "メモリ保存: curated OK"
+                        else:
+                            title, body = _split_title_body(payload)
+                            self.manager.memory_vault.append_daily(body, title=title, author=agent_id)
+                            mm = getattr(self.manager, "memory_manager", None)
+                            if mm is not None:
+                                mm.ingest_all_sources()
+                            result_text = "メモリ保存: daily OK"
+                    except Exception as exc:
+                        logger.warning("Sub-agent memory action failed: %s", exc, exc_info=True)
+                        result_text = f"メモリ保存エラー: {exc}"
 
                     conversation.append({"role": "user", "content": result_text})
                     needs_followup = True

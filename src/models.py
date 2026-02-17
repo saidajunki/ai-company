@@ -312,6 +312,23 @@ class ConsultationEntry(BaseModel):
     related_task_id: Optional[str] = None
 
 
+# --- Commitments / TODOs ---
+
+class CommitmentEntry(BaseModel):
+    """約束/TODO（オープンな義務）を保持する."""
+
+    commitment_id: str
+    created_at: datetime
+    status: Literal["open", "done", "canceled"] = "open"
+    title: str = ""
+    content: str
+    owner: str = "ceo"
+    due_date: Optional[date] = None
+    related_task_id: Optional[str] = None
+    closed_at: Optional[datetime] = None
+    close_note: Optional[str] = None
+
+
 # --- Initiative Models (Req 3.1) ---
 
 

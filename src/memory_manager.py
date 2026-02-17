@@ -18,6 +18,7 @@ from constitution_store import constitution_load
 from journal import JournalWriter
 from memory_index import MemoryIndex
 from models import (
+    CommitmentEntry,
     ConsultationEntry,
     ConversationEntry,
     CreatorReview,
@@ -25,6 +26,7 @@ from models import (
     ResearchNote,
     TaskEntry,
 )
+from memory_vault import curated_memory_path
 from rolling_summary import RollingSummary
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,11 @@ _PIN_KEYWORDS = (
     "必須",
     "予算",
     "承認",
+    "停止",
+    "中止",
+    "保留",
+    "休止",
+    "再開",
 )
 
 
@@ -86,6 +93,8 @@ class MemoryManager:
 
         self._upsert_constitution(company_root / "constitution.yaml")
         self._upsert_vision(company_root / "vision.md")
+        self._upsert_curated_memory(curated_memory_path(self.base_dir, self.company_id))
+        self._upsert_daily_memory_recent(company_root / "knowledge" / "daily")
 
         self._ingest_ndjson(
             company_root / "state" / "conversations.ndjson",
@@ -101,6 +110,11 @@ class MemoryManager:
             company_root / "state" / "consultations.ndjson",
             source_key="consultations",
             handler=self._handle_consultation_line,
+        )
+        self._ingest_ndjson(
+            company_root / "state" / "commitments.ndjson",
+            source_key="commitments",
+            handler=self._handle_commitment_line,
         )
         self._ingest_ndjson(
             company_root / "state" / "research_notes.ndjson",
@@ -198,6 +212,48 @@ class MemoryManager:
         except Exception:
             logger.debug("Failed to upsert vision", exc_info=True)
 
+    def _upsert_curated_memory(self, path: Path) -> None:
+        if not path.exists():
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+            self.index.upsert(
+                doc_id="curated_memory",
+                text=text,
+                source_type="curated_memory",
+                source_id=str(path),
+                importance=5,
+                tags=["curated", "pinned"],
+                created_at=datetime.now(timezone.utc),
+            )
+        except Exception:
+            logger.debug("Failed to upsert curated memory", exc_info=True)
+
+    def _upsert_daily_memory_recent(self, daily_dir: Path, *, max_files: int = 7) -> None:
+        if not daily_dir.exists():
+            return
+        try:
+            files = [p for p in daily_dir.glob("*.md") if p.is_file()]
+            files.sort(key=lambda p: p.name)
+            recent = files[-max_files:] if max_files > 0 else files
+            for path in recent:
+                try:
+                    day = path.stem
+                    text = path.read_text(encoding="utf-8")
+                    self.index.upsert(
+                        doc_id=f"daily_memory:{day}",
+                        text=text,
+                        source_type="daily_memory",
+                        source_id=str(path),
+                        importance=4,
+                        tags=["daily"],
+                        created_at=datetime.now(timezone.utc),
+                    )
+                except Exception:
+                    logger.debug("Failed to upsert daily memory file: %s", path, exc_info=True)
+        except Exception:
+            logger.debug("Failed to list daily memory directory: %s", daily_dir, exc_info=True)
+
     def _handle_conversation_line(self, raw: str) -> None:
         entry = ConversationEntry.model_validate_json(raw)
         h = hashlib.sha1((entry.content or "").encode("utf-8")).hexdigest()[:10]
@@ -250,6 +306,31 @@ class MemoryManager:
             created_at=entry.created_at,
             importance=importance,
             tags=tags,
+        )
+
+    def _handle_commitment_line(self, raw: str) -> None:
+        entry = CommitmentEntry.model_validate_json(raw)
+        due = entry.due_date.isoformat() if entry.due_date else "n/a"
+        lines = [
+            f"commitment[{entry.status}] {entry.title}".strip(),
+            entry.content,
+            f"owner: {entry.owner}",
+            f"due: {due}",
+        ]
+        if entry.related_task_id:
+            lines.append(f"related_task_id: {entry.related_task_id}")
+        if entry.close_note:
+            lines.append(f"close_note: {entry.close_note}")
+        text = "\n".join([l for l in lines if (l or "").strip()])
+        importance = 5 if entry.status == "open" else 3
+        self.index.upsert(
+            doc_id=f"commitment:{entry.commitment_id}",
+            text=text,
+            source_type="commitment",
+            source_id=entry.related_task_id or entry.commitment_id,
+            created_at=entry.created_at,
+            importance=importance,
+            tags=["commitment", entry.status],
         )
 
     def _handle_research_line(self, raw: str) -> None:
@@ -412,4 +493,3 @@ class MemoryManager:
             )
         except Exception:
             logger.warning("Failed to append journal", exc_info=True)
-

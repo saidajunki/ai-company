@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from models import (
     ConstitutionModel,
     ConversationEntry,
+    CommitmentEntry,
     CreatorReview,
     DecisionLogEntry,
     InitiativeEntry,
@@ -44,6 +45,8 @@ def build_system_prompt(
     budget_limit: float,
     conversation_history: list[ConversationEntry] | None = None,
     vision_text: str | None = None,
+    curated_memory_text: str | None = None,
+    daily_memory_text: str | None = None,
     creator_reviews: list[CreatorReview] | None = None,
     research_notes: list[ResearchNote] | None = None,
     task_history: TaskHistoryContext | None = None,
@@ -53,6 +56,7 @@ def build_system_prompt(
     rolling_summary: str | None = None,
     recalled_memories: list[str] | None = None,
     slack_thread_context: str | None = None,
+    open_commitments: list[CommitmentEntry] | None = None,
 ) -> str:
     """コンテキスト情報からシステムプロンプトを構築する."""
     sections: list[str] = [
@@ -65,11 +69,17 @@ def build_system_prompt(
     # --- ビジョン・事業方針 ---
     sections.append(_build_vision_section(vision_text))
 
+    # --- キュレートメモリ（絶対に忘れない） ---
+    sections.append(_build_curated_memory_section(curated_memory_text))
+
     # --- 評価（Creatorスコア） ---
     sections.append(_build_creator_score_section(constitution, creator_reviews))
 
     # --- 現在のWIP ---
     sections.append(_build_wip_section(wip))
+
+    # --- 約束/TODO（Commitments） ---
+    sections.append(_build_commitments_section(open_commitments))
 
     # --- 直近の意思決定 ---
     sections.append(_build_decisions_section(recent_decisions))
@@ -98,6 +108,9 @@ def build_system_prompt(
     # --- Slackスレッド（コンテキスト） ---
     sections.append(_build_slack_thread_section(slack_thread_context))
 
+    # --- Dailyメモ（本日） ---
+    sections.append(_build_daily_memory_section(daily_memory_text))
+
     # --- 会話履歴 ---
     sections.append(_build_conversation_section(conversation_history))
 
@@ -105,6 +118,9 @@ def build_system_prompt(
     model_section = _build_model_catalog_section(model_catalog_text)
     if model_section:
         sections.append(model_section)
+
+    # --- VPSインフラ操作ガイダンス ---
+    sections.append(_build_infra_guidance_section())
 
     # --- 応答フォーマット ---
     sections.append(_build_format_section())
@@ -188,6 +204,51 @@ def _build_strategy_section(
         lines.append(strategy_direction.summary)
     return "\n".join(lines)
 
+
+def _build_curated_memory_section(curated_memory_text: str | None) -> str:
+    lines = ["## キュレートメモリ（LTM / 絶対に忘れない）"]
+    t = (curated_memory_text or "").strip()
+    if not t:
+        lines.append("（なし）")
+        return "\n".join(lines)
+    lines.append(t)
+    return "\n".join(lines)
+
+
+def _build_commitments_section(open_commitments: list[CommitmentEntry] | None) -> str:
+    lines = ["## 約束/TODO（未完了Commitments）"]
+    if not open_commitments:
+        lines.append("なし")
+        return "\n".join(lines)
+
+    # Due date first, then created_at
+    def _key(c: CommitmentEntry):
+        due = c.due_date.isoformat() if c.due_date else "9999-99-99"
+        return (due, c.created_at.isoformat())
+
+    for c in sorted(open_commitments, key=_key)[:12]:
+        title = (c.title or "").strip()
+        content = (c.content or "").strip()
+        first = content.splitlines()[0] if content else ""
+        if len(first) > 140:
+            first = first[:140] + "…"
+        due = c.due_date.isoformat() if c.due_date else "n/a"
+        if title:
+            lines.append(f"- [{c.commitment_id}] {title} (due={due}) — {first}")
+        else:
+            lines.append(f"- [{c.commitment_id}] (due={due}) — {first}")
+    return "\n".join(lines)
+
+
+def _build_daily_memory_section(daily_memory_text: str | None) -> str:
+    lines = ["## Dailyメモ（本日）"]
+    t = (daily_memory_text or "").strip()
+    if not t:
+        lines.append("なし")
+        return "\n".join(lines)
+    lines.append(t)
+    return "\n".join(lines)
+
 def _build_rolling_summary_section(rolling_summary: str | None) -> str:
     if rolling_summary and rolling_summary.strip():
         text = rolling_summary.strip()
@@ -218,6 +279,93 @@ def _build_slack_thread_section(slack_thread_context: str | None) -> str:
     return "\n".join(lines)
 
 
+def _build_infra_guidance_section() -> str:
+    """VPSインフラ操作のガイダンスセクションを構築する."""
+    return "\n".join([
+        "## VPSインフラ操作",
+        "",
+        "あなたはVPS上で直接動作しています。<shell>タグで任意のコマンドを実行できます。",
+        "Docker, Docker Compose, Traefik等すべてシェルコマンドで操作してください。",
+        "",
+        "### 環境情報",
+        "- OS: Ubuntu, Docker 29.x, Docker Compose v2",
+        "- Traefik v2.11 がリバースプロキシとして稼働中（apps-network上）",
+        "- Let's Encrypt自動SSL（certresolver=letsencrypt）",
+        "- サービスディレクトリ: /opt/apps/{サービス名}/",
+        "- Dockerネットワーク: apps-network（external）",
+        "",
+        "### 新サービスのデプロイ手順",
+        "1. ディレクトリ作成: `mkdir -p /opt/apps/{サービス名}`",
+        "2. docker-compose.yml を作成（cat > で書き出し）",
+        "3. `cd /opt/apps/{サービス名} && docker compose up -d`",
+        "4. `docker compose ps` でステータス確認",
+        "",
+        "### Traefikラベル（docker-compose.yml内で設定）",
+        "```yaml",
+        "labels:",
+        '  - "traefik.enable=true"',
+        '  - "traefik.http.routers.{サービス名}.rule=Host(`{ドメイン}`)"',
+        '  - "traefik.http.routers.{サービス名}.entrypoints=websecure"',
+        '  - "traefik.http.routers.{サービス名}.tls.certresolver=letsencrypt"',
+        '  - "traefik.http.services.{サービス名}.loadbalancer.server.port={ポート}"',
+        "```",
+        "※ メインサービスのみにラベルを付与。apps-networkに接続すること。",
+        "",
+        "### WordPressデプロイ例",
+        "```yaml",
+        "services:",
+        "  wordpress:",
+        "    image: wordpress:latest",
+        "    restart: unless-stopped",
+        "    environment:",
+        "      WORDPRESS_DB_HOST: db:3306",
+        "      WORDPRESS_DB_USER: wordpress",
+        "      WORDPRESS_DB_PASSWORD: {ランダム生成}",
+        "      WORDPRESS_DB_NAME: wordpress",
+        "    volumes:",
+        "      - wp_data:/var/www/html",
+        "    networks:",
+        "      - apps-network",
+        "    labels:",
+        '      - "traefik.enable=true"',
+        '      - "traefik.http.routers.{名前}.rule=Host(`{ドメイン}`)"',
+        '      - "traefik.http.routers.{名前}.entrypoints=websecure"',
+        '      - "traefik.http.routers.{名前}.tls.certresolver=letsencrypt"',
+        '      - "traefik.http.services.{名前}.loadbalancer.server.port=80"',
+        "  db:",
+        "    image: mysql:8.0",
+        "    restart: unless-stopped",
+        "    environment:",
+        "      MYSQL_ROOT_PASSWORD: {ランダム生成}",
+        "      MYSQL_DATABASE: wordpress",
+        "      MYSQL_USER: wordpress",
+        "      MYSQL_PASSWORD: {上と同じ}",
+        "    volumes:",
+        "      - db_data:/var/lib/mysql",
+        "volumes:",
+        "  wp_data:",
+        "  db_data:",
+        "networks:",
+        "  apps-network:",
+        "    external: true",
+        "```",
+        "",
+        "### ライフサイクル管理コマンド",
+        "- 起動: `cd /opt/apps/{名前} && docker compose up -d`",
+        "- 停止: `cd /opt/apps/{名前} && docker compose down`",
+        "- 再起動: `cd /opt/apps/{名前} && docker compose restart`",
+        "- ログ: `cd /opt/apps/{名前} && docker compose logs --tail=100`",
+        "- 状態: `cd /opt/apps/{名前} && docker compose ps`",
+        "- 全コンテナ一覧: `docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}'`",
+        "",
+        "### 注意事項",
+        "- パスワードは `openssl rand -base64 24` 等で生成する",
+        "- compose.ymlの書き出しは `cat > /opt/apps/{名前}/docker-compose.yml << 'EOF'` を使う",
+        "- デプロイ後は必ず `docker compose ps` で正常起動を確認する",
+        "- 問題があれば `docker compose logs` でログを確認する",
+    ])
+
+
 def _build_format_section() -> str:
     return "\n".join([
         "## 応答フォーマット",
@@ -241,6 +389,28 @@ def _build_format_section() -> str:
         "create_repo:repo_name:description もしくは commit:repo_path:message",
         "</publish>",
         "※ 公開が必要な場合に使用（GitHub等のリポジトリ作成/コミット&push）。",
+        "",
+        "<memory>",
+        "curated: タイトル（任意）",
+        "本文（価値観/方針/禁止事項/重要な合意など、絶対に忘れたくない内容）",
+        "</memory>",
+        "※ 重要な価値観・方向性・ルール・大事な合意は、<memory>で保存してください（失われないように）。",
+        "",
+        "<memory>",
+        "daily: タイトル（任意）",
+        "本文（今日の学び/やったこと/次の作戦 など）",
+        "</memory>",
+        "※ 今日の学び/作戦はdailyに追記して、後から追える形にしてください。",
+        "",
+        "<commitment>",
+        "add: タイトル（任意）",
+        "本文（約束/TODO。いつか必ずやること・忘れたくないこと）",
+        "</commitment>",
+        "",
+        "<commitment>",
+        "close <commitment_id>: 完了メモ（任意）",
+        "</commitment>",
+        "※ 約束/TODOはcommitmentとして記録し、完了したらcloseしてください。",
         "",
         "<done>",
         "タスク完了の要約",

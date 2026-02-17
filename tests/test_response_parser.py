@@ -247,6 +247,52 @@ class TestPublishTag:
 
 
 # ---------------------------------------------------------------------------
+# memory タグ
+# ---------------------------------------------------------------------------
+
+class TestMemoryTag:
+    """<memory> タグの解析テスト."""
+
+    def test_parse_memory_tag(self):
+        text = "<memory>curated: 価値観は面白さ最優先</memory>"
+        actions = parse_response(text)
+        assert len(actions) == 1
+        assert actions[0].action_type == "memory"
+        assert "価値観" in actions[0].content
+
+    def test_format_memory_roundtrip(self):
+        original = [Action(action_type="memory", content="pin: テスト")]
+        formatted = format_actions(original)
+        assert "<memory>" in formatted
+        assert "</memory>" in formatted
+        reparsed = parse_response(formatted)
+        assert reparsed == original
+
+
+# ---------------------------------------------------------------------------
+# commitment タグ
+# ---------------------------------------------------------------------------
+
+class TestCommitmentTag:
+    """<commitment> タグの解析テスト."""
+
+    def test_parse_commitment_tag(self):
+        text = "<commitment>add: TODO\nやること</commitment>"
+        actions = parse_response(text)
+        assert len(actions) == 1
+        assert actions[0].action_type == "commitment"
+        assert "TODO" in actions[0].content
+
+    def test_format_commitment_roundtrip(self):
+        original = [Action(action_type="commitment", content="close ab12cd34: done")]
+        formatted = format_actions(original)
+        assert "<commitment>" in formatted
+        assert "</commitment>" in formatted
+        reparsed = parse_response(formatted)
+        assert reparsed == original
+
+
+# ---------------------------------------------------------------------------
 # 混合タグ
 # ---------------------------------------------------------------------------
 
@@ -284,6 +330,9 @@ class TestMixedTags:
             Action(action_type="consult", content="相談したいです"),
             Action(action_type="delegate", content="worker:タスク", model="google/gemini-2.5-flash"),
             Action(action_type="plan", content="1. タスク1\n2. タスク2"),
+            Action(action_type="control", content="pause 1234abcd: 理由"),
+            Action(action_type="memory", content="pin: テスト"),
+            Action(action_type="commitment", content="add: TODO\nsomething"),
             Action(action_type="done", content="finished"),
         ]
         formatted = format_actions(original)
