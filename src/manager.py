@@ -982,19 +982,28 @@ class Manager:
 
                 elif action.action_type == "consult":
                     logger.info("Consultation requested: %s", action.content[:120])
+                    consult_text = action.content.strip()
                     try:
-                        entry = self.consultation_store.add(
-                            action.content.strip(),
+                        entry, created = self.consultation_store.ensure_pending(
+                            consult_text,
                             related_task_id=task_id,
                         )
+                        if not created:
+                            logger.info(
+                                "Consultation already pending (consult_id=%s, task_id=%s)",
+                                entry.consultation_id,
+                                task_id,
+                            )
+                            return
+
                         message = (
                             f"🤝 相談 [consult_id: {entry.consultation_id}]\n\n"
-                            f"{action.content.strip()}\n\n"
+                            f"{consult_text}\n\n"
                             f"（解決メモを残す場合: `resolve {entry.consultation_id}: ...`）"
                         )
                     except Exception:
                         logger.warning("Failed to record consultation", exc_info=True)
-                        message = f"🤝 相談\n\n{action.content.strip()}"
+                        message = f"🤝 相談\n\n{consult_text}"
                     self._slack_send(message)
                     return
 

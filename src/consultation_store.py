@@ -32,6 +32,26 @@ class ConsultationStore:
         ndjson_append(self._path, entry)
         return entry
 
+    def ensure_pending(
+        self, content: str, *, related_task_id: str | None = None
+    ) -> tuple[ConsultationEntry, bool]:
+        """Ensure a pending consultation exists (dedupe identical pending items).
+
+        Returns:
+            (entry, created) where created=True only when a new pending entry was added.
+        """
+        normalized = (content or "").strip()
+        try:
+            for c in self.list_by_status("pending"):
+                if c.related_task_id == related_task_id and (c.content or "").strip() == normalized:
+                    return c, False
+        except Exception:
+            # Best-effort: if listing fails, fall back to creating a new entry.
+            pass
+
+        entry = self.add(normalized, related_task_id=related_task_id)
+        return entry, True
+
     def resolve(self, consultation_id: str, *, resolution: str = "") -> ConsultationEntry:
         current = self.get_latest(consultation_id)
         if current is None:
@@ -61,4 +81,3 @@ class ConsultationStore:
             if entry.consultation_id == consultation_id:
                 return entry
         return None
-

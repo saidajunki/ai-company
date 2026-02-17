@@ -340,16 +340,24 @@ class AutonomousLoop:
                     elif action.action_type == "reply":
                         self._report(action.content)
                     elif action.action_type == "consult":
+                        consult_text = action.content.strip()
                         try:
-                            entry = self.manager.consultation_store.add(
-                                action.content.strip(),
+                            entry, created = self.manager.consultation_store.ensure_pending(
+                                consult_text,
                                 related_task_id=task.task_id,
                             )
-                            self._report(
-                                f"🤝 相談 [consult_id: {entry.consultation_id}]\n\n{action.content.strip()}"
-                            )
+                            if created:
+                                self._report(
+                                    f"🤝 相談 [consult_id: {entry.consultation_id}]\n\n{consult_text}"
+                                )
+                            else:
+                                logger.info(
+                                    "Consultation already pending (consult_id=%s, task_id=%s)",
+                                    entry.consultation_id,
+                                    task.task_id,
+                                )
                         except Exception:
-                            self._report(f"🤝 相談\n\n{action.content.strip()}")
+                            self._report(f"🤝 相談\n\n{consult_text}")
                         self.manager.task_queue.update_status(
                             task.task_id, "failed", error="相談待ち"
                         )
@@ -573,6 +581,9 @@ class AutonomousLoop:
         """リトライ可能な失敗タスクをpendingに戻す."""
         failed = self.manager.task_queue.list_by_status("failed")
         for task in sorted(failed, key=lambda t: t.priority):
+            # エスカレーション済みタスクはスキップ
+            if task.error and task.error.startswith("[escalated]"):
+                continue
             if task.retry_count < task.max_retries:
                 logger.info(
                     "Retrying task %s (retry %d/%d, error: %s)",
@@ -595,16 +606,32 @@ class AutonomousLoop:
             f"task_id: {task.task_id}"
         )
         try:
-            entry = self.manager.consultation_store.add(
+            entry, created = self.manager.consultation_store.ensure_pending(
                 content,
                 related_task_id=task.task_id,
             )
-            self._report(
-                f"🚨 エスカレーション [consult_id: {entry.consultation_id}]\n\n{content}"
-            )
+            if created:
+                self._report(
+                    f"🚨 エスカレーション [consult_id: {entry.consultation_id}]\n\n{content}"
+                )
+            else:
+                logger.info(
+                    "Escalation already pending (consult_id=%s, task_id=%s)",
+                    entry.consultation_id,
+                    task.task_id,
+                )
         except Exception:
             logger.warning("Failed to escalate task %s", task.task_id, exc_info=True)
             self._report(f"🚨 エスカレーション\n\n{content}")
+
+        # エスカレーション済みマーカーを付けて再処理を防止
+        try:
+            self.manager.task_queue.update_status(
+                task.task_id, "failed",
+                error=f"[escalated] {task.error or '不明'}",
+            )
+        except Exception:
+            logger.warning("Failed to mark task as escalated: %s", task.task_id, exc_info=True)
 
     def _check_initiative_completion(self, task_id: str) -> None:
         """タスク完了時にイニシアチブの全タスク完了を検知し、振り返りを生成する."""
@@ -685,5 +712,4 @@ class AutonomousLoop:
             logger.exception(
                 "Error checking parent completion for task %s", task.task_id
             )
-
 

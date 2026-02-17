@@ -588,6 +588,32 @@ class TestRetryFailedTasks:
         call_args = mock_consult.add.call_args
         assert task.task_id in call_args[0][0]
 
+        # エスカレーション済みマーカーが付いていること
+        updated = mgr.task_queue._get_latest(task.task_id)
+        assert updated.error.startswith("[escalated]")
+
+    def test_escalated_task_not_re_escalated(self, tmp_path: Path):
+        """エスカレーション済みタスクは再度エスカレーションされない."""
+        mgr = _make_manager(tmp_path)
+        mock_consult = MagicMock()
+        mock_consult.add.return_value = MagicMock(consultation_id="esc12345")
+        mgr.consultation_store = mock_consult
+        loop = AutonomousLoop(mgr)
+
+        task = mgr.task_queue.add("doomed task")
+        mgr.task_queue.update_status(task.task_id, "failed", error="致命的エラー")
+        for i in range(3):
+            mgr.task_queue.update_status_for_retry(task.task_id, retry_count=i + 1)
+            mgr.task_queue.update_status(task.task_id, "failed", error="致命的エラー")
+
+        # 1回目のエスカレーション
+        loop._retry_failed_tasks()
+        assert mock_consult.add.call_count == 1
+
+        # 2回目のtickではエスカレーションされない
+        loop._retry_failed_tasks()
+        assert mock_consult.add.call_count == 1  # 変わらない
+
     def test_tick_calls_retry_before_pick(self, tmp_path: Path):
         """tick()が_pick_taskの前に_retry_failed_tasksを呼ぶ."""
         mgr = _make_manager(tmp_path)
