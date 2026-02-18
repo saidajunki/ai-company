@@ -1919,7 +1919,25 @@ class Manager:
                             result_text = "公開エラー: self_commit のメッセージが空です"
                         else:
                             repo_root = Path(os.environ.get("APP_REPO_PATH", "/opt/apps/ai-company"))
-                            pub_result = self.git_publisher.commit_and_push(repo_root, message)
+                            safe_files = [
+                                "src",
+                                "tests",
+                                "docs",
+                                "dashboard",
+                                ".github",
+                                "Dockerfile",
+                                "docker-compose.yml",
+                                "pyproject.toml",
+                                "README.md",
+                                ".env.template",
+                                "ai-company.service",
+                                "setup-venv.sh",
+                                "deploy-to-vps.sh",
+                                "install-watchdog.sh",
+                                "watchdog.py",
+                                "migrate-to-host.sh",
+                            ]
+                            pub_result = self.git_publisher.commit_and_push(repo_root, message, files=safe_files)
                             if pub_result.success:
                                 result_text = f"公開結果: {pub_result.message}"
                             else:

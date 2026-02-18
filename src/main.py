@@ -306,10 +306,7 @@ def main() -> None:
         log.info("Slack Bot connected (Socket Mode)")
 
         # Send startup notification
-        slack.send_message(
-            f"🟢 AI Company Manager 起動完了\n"
-            f"会社: {COMPANY_ID} | 復旧アクション: {action} ({description})"
-        )
+        slack.send_message("🟢 AI Company Manager 起動完了")
     else:
         log.warning("SLACK_BOT_TOKEN or SLACK_APP_TOKEN not set – running without Slack")
 

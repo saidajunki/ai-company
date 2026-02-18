@@ -187,7 +187,7 @@ class SubAgentRunner:
         if model:
             effective_model = model
         else:
-            effective_model = select_model_for_role(role, fallback_model=ceo_model)
+            effective_model = select_model_for_role(role, fallback_model=ceo_model, task_description=task_description)
 
         # Generate agent_id
         agent_id = f"sub-{uuid4().hex[:6]}"
