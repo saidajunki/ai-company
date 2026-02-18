@@ -36,7 +36,7 @@ log = logging.getLogger("ai-company")
 COMPANY_ID = os.environ.get("COMPANY_ID", "alpha")
 BASE_DIR = Path(os.environ.get("BASE_DIR", "/opt/apps/ai-company/data"))
 HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", "180"))  # 3 min
-REPORT_INTERVAL = int(os.environ.get("REPORT_INTERVAL", "600"))  # 10 min
+REPORT_INTERVAL = 0  # hard-disabled in minimal mode
 DAILY_BRIEF_INTERVAL = int(os.environ.get("DAILY_BRIEF_INTERVAL", "0"))  # disabled by default
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
@@ -95,12 +95,7 @@ def main() -> None:
     else:
         log.warning("OPENROUTER_API_KEY not set – LLM features disabled")
 
-    # Refresh OpenRouter pricing snapshot on startup (best-effort)
-    try:
-        mgr.refresh_pricing_cache(api_key=OPENROUTER_API_KEY)
-        log.info("Pricing cache refreshed (models=%s)", len(mgr.pricing_cache.models) if mgr.pricing_cache else "none")
-    except Exception:
-        log.exception("Failed to refresh pricing cache on startup")
+    # Pricing/ledger based budget control is disabled in minimal mode.
 
     # --- Slack integration ---
     slack = None
@@ -335,20 +330,9 @@ def main() -> None:
                 pid=os.getpid(),
             )
 
-            # Check budget
-            if mgr.check_budget():
-                log.warning("Budget exceeded – pausing LLM/API calls")
-
-            # Autonomous task execution (Req 3.2)
-            try:
-                if hasattr(mgr, 'autonomous_loop') and mgr.autonomous_loop:
-                    mgr.autonomous_loop.tick()
-            except Exception:
-                log.exception("Error in autonomous loop tick")
-
-            # Send 10-minute report (Req 3.2)
+            # Send periodic report (optional)
             elapsed = time.monotonic() - last_report_at
-            if elapsed >= REPORT_INTERVAL and slack:
+            if REPORT_INTERVAL > 0 and elapsed >= REPORT_INTERVAL and slack:
                 try:
                     report = mgr.generate_report()
                     ts = slack.send_report(report)

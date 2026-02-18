@@ -58,74 +58,16 @@ def build_system_prompt(
     slack_thread_context: str | None = None,
     open_commitments: list[CommitmentEntry] | None = None,
 ) -> str:
-    """コンテキスト情報からシステムプロンプトを構築する."""
-    sections: list[str] = [
-        "あなたはAI会社の社長AIです。以下のコンテキストに基づいて行動してください。",
-    ]
-
-    # --- 会社憲法 ---
-    sections.append(_build_constitution_section(constitution))
-
-    # --- ビジョン・事業方針 ---
-    sections.append(_build_vision_section(vision_text))
-
-    # --- キュレートメモリ（絶対に忘れない） ---
-    sections.append(_build_curated_memory_section(curated_memory_text))
-
-    # --- 評価（Creatorスコア） ---
-    sections.append(_build_creator_score_section(constitution, creator_reviews))
-
-    # --- 現在のWIP ---
-    sections.append(_build_wip_section(wip))
-
-    # --- 約束/TODO（Commitments） ---
-    sections.append(_build_commitments_section(open_commitments))
-
-    # --- 直近の意思決定 ---
-    sections.append(_build_decisions_section(recent_decisions))
-
-    # --- 予算状況 ---
-    sections.append(_build_budget_section(budget_spent, budget_limit))
-
-    # --- イニシアチブ ---
-    sections.append(_build_initiative_section(active_initiatives))
-
-    # --- 戦略方針 ---
-    sections.append(_build_strategy_section(strategy_direction))
-
-    # --- リサーチノート ---
-    sections.append(_build_research_section(research_notes))
-
-    # --- 永続メモリ（要約） ---
-    sections.append(_build_rolling_summary_section(rolling_summary))
-
-    # --- 長期記憶（リコール） ---
-    sections.append(_build_memory_recall_section(recalled_memories))
-
-    # --- タスク履歴 ---
-    sections.append(_build_task_history_section(task_history))
-
-    # --- Slackスレッド（コンテキスト） ---
-    sections.append(_build_slack_thread_section(slack_thread_context))
-
-    # --- Dailyメモ（本日） ---
-    sections.append(_build_daily_memory_section(daily_memory_text))
-
-    # --- 会話履歴 ---
-    sections.append(_build_conversation_section(conversation_history))
-
-    # --- 利用可能なモデル ---
-    model_section = _build_model_catalog_section(model_catalog_text)
-    if model_section:
-        sections.append(model_section)
-
-    # --- VPSインフラ操作ガイダンス ---
-    sections.append(_build_infra_guidance_section())
-
-    # --- 応答フォーマット ---
-    sections.append(_build_format_section())
-
-    return "\n\n".join(sections)
+    """最小モード用のシステムプロンプトを構築する."""
+    return "\n\n".join([
+        "あなたはAI会社の社長AIです。",
+        "このVPSはあなたの作業環境です。必要なシェルコマンドは自由に実行して構いません。",
+        "現在は最小モードです。予算管理・自動タスク生成・長期記憶評価は行いません。",
+        "必要ならコードを自分で編集し、再読込は restart_manager.flag を touch して行ってください。",
+        "ソースコードを変更したら、VPS上のリポジトリで必ずコミット&プッシュしてください（<publish>self_commit:...</publish>）。",
+        "Creatorへの連絡は <reply> と <consult> を使って行ってください。",
+        _build_format_section(),
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -401,9 +343,10 @@ def _build_format_section() -> str:
         "</shell>",
         "",
         "<publish>",
-        "create_repo:repo_name:description もしくは commit:repo_path:message",
+        "create_repo:repo_name:description / commit:repo_path:message / self_commit:message",
         "</publish>",
         "※ 公開が必要な場合に使用（GitHub等のリポジトリ作成/コミット&push）。",
+        "※ self_commit は APP_REPO_PATH（既定: /opt/apps/ai-company）を git add -A → commit → push します。",
         "",
         "<memory>",
         "curated: タイトル（任意）",

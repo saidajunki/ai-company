@@ -20,7 +20,6 @@ except ImportError:
     from typing_extensions import Literal
 
 from agent_registry import AgentRegistry
-from autonomous_loop import AutonomousLoop
 from constitution_store import constitution_save
 from context_builder import build_system_prompt, TaskHistoryContext
 from conversation_memory import ConversationMemory
@@ -62,10 +61,8 @@ from sub_agent_runner import SubAgentRunner
 from git_publisher import GitPublisher
 from initiative_store import InitiativeStore
 from initiative_planner import InitiativePlanner
-from recovery_planner import RecoveryPlanner
 from strategy_analyzer import StrategyAnalyzer
 from model_catalog import build_model_catalog, format_model_catalog_for_prompt
-from memory_manager import MemoryManager
 from memory_vault import DEFAULT_CURATED_MEMORY, curated_memory_path, MemoryVault
 from web_searcher import WebSearcher
 from task_queue import TaskQueue
@@ -185,11 +182,7 @@ class Manager:
         self.consultation_store = ConsultationStore(base_dir, company_id)
         self.commitment_store = CommitmentStore(base_dir, company_id)
         self.memory_vault = MemoryVault(base_dir, company_id)
-        try:
-            self.memory_manager: MemoryManager | None = MemoryManager(base_dir, company_id)
-        except Exception:
-            logger.warning("Failed to initialize memory manager", exc_info=True)
-            self.memory_manager = None
+        self.memory_manager = None
 
         # Autonomous growth components
         self.vision_loader = VisionLoader(base_dir, company_id)
@@ -197,7 +190,7 @@ class Manager:
         self.agent_registry = AgentRegistry(base_dir, company_id)
         self.service_registry = ServiceRegistry(base_dir, company_id)
         self.sub_agent_runner = SubAgentRunner(self)
-        self.autonomous_loop = AutonomousLoop(self)
+        self.autonomous_loop = None
         self.web_searcher = WebSearcher()
         self.research_note_store = ResearchNoteStore(base_dir, company_id)
         self.git_publisher = GitPublisher(work_dir=self.base_dir / "companies" / self.company_id)
@@ -206,7 +199,7 @@ class Manager:
         self.initiative_store = InitiativeStore(base_dir, company_id)
         self.strategy_analyzer = StrategyAnalyzer(self.creator_review_store, self.initiative_store)
         self.initiative_planner = InitiativePlanner(self, self.initiative_store, self.strategy_analyzer)
-        self.recovery_planner = RecoveryPlanner(self, self.initiative_planner)
+        self.recovery_planner = None
 
     # ------------------------------------------------------------------
     # Startup (Req 7.1, 7.6)
@@ -239,13 +232,6 @@ class Manager:
         except Exception:
             logger.warning("Failed to ensure CEO agent registration", exc_info=True)
 
-        # Bootstrap long-term memory (best-effort)
-        try:
-            if self.memory_manager is not None:
-                self.memory_manager.bootstrap()
-        except Exception:
-            logger.warning("Memory bootstrap failed", exc_info=True)
-
         # Ensure curated memory file exists (file-first LTM)
         try:
             self.memory_vault.ensure_initialized()
@@ -255,14 +241,6 @@ class Manager:
         # Determine what to do first after wakeup
         action, description = determine_recovery_action(self.state)
 
-        # If consult_creator, try autonomous recovery first
-        if action == "consult_creator":
-            try:
-                idle_result = self.recovery_planner.handle_idle()
-                return action, idle_result
-            except Exception:
-                logger.warning("RecoveryPlanner failed, falling back to consult_creator", exc_info=True)
-
         return action, description
 
     # ------------------------------------------------------------------
@@ -270,17 +248,8 @@ class Manager:
     # ------------------------------------------------------------------
 
     def check_budget(self) -> bool:
-        """Return ``True`` if the 60-min sliding window budget is exceeded."""
-        now = datetime.now(timezone.utc)
-        limit = DEFAULT_BUDGET_LIMIT_USD
-        if self.state.constitution and self.state.constitution.budget:
-            limit = self.state.constitution.budget.limit_usd
-        return is_budget_exceeded(
-            self.state.ledger_events,
-            now,
-            limit_usd=limit,
-            window_minutes=DEFAULT_WINDOW_MINUTES,
-        )
+        """Budget management is disabled in minimal mode."""
+        return False
 
     def refresh_pricing_cache(self, *, api_key: str | None = None, force: bool = False) -> None:
         """Refresh OpenRouter pricing cache (best-effort)."""
@@ -308,36 +277,9 @@ class Manager:
         agent_id: str = "manager",
         task_id: str = "",
     ) -> LedgerEvent:
-        """Record an LLM call to the ledger with pricing lookup.
-
-        Uses the pricing cache with fallback logic (Req 9.3).
-
-        Returns:
-            The persisted ``LedgerEvent``.
-        """
-        previous_cache = self.pricing_cache
-        pricing, source = get_pricing_with_fallback(self.pricing_cache, model)
-
-        # Unknown model → refresh pricing cache (optional, best-effort)
-        auto_refresh = os.environ.get("OPENROUTER_PRICING_AUTO_REFRESH", "0") == "1"
-        if auto_refresh and source == "fallback_default" and model not in self._pricing_refresh_attempted_models:
-            self._pricing_refresh_attempted_models.add(model)
-            try:
-                self.refresh_pricing_cache(force=True)
-                pricing, source = get_pricing_with_fallback(
-                    self.pricing_cache,
-                    model,
-                    previous_cache=previous_cache,
-                )
-            except Exception:
-                logger.warning("Failed to refresh pricing cache for model=%s", model, exc_info=True)
-
-        input_cost = (input_tokens / 1000) * pricing.input_price_per_1k
-        output_cost = (output_tokens / 1000) * pricing.output_price_per_1k
-        estimated_cost = input_cost + output_cost
-
+        """LLM cost/ledger tracking is disabled in minimal mode."""
         now = datetime.now(timezone.utc)
-        event = LedgerEvent(
+        return LedgerEvent(
             timestamp=now,
             event_type="llm_call",
             agent_id=agent_id,
@@ -346,16 +288,11 @@ class Manager:
             model=model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            unit_price_usd_per_1k_input_tokens=pricing.input_price_per_1k,
-            unit_price_usd_per_1k_output_tokens=pricing.output_price_per_1k,
-            price_retrieved_at=pricing.retrieved_at,
-            estimated_cost_usd=estimated_cost,
-            metadata={"pricing_source": source} if source != "cache" else None,
+            unit_price_usd_per_1k_input_tokens=0.0,
+            unit_price_usd_per_1k_output_tokens=0.0,
+            price_retrieved_at=now,
+            estimated_cost_usd=0.0,
         )
-
-        append_ledger_event(self.base_dir, self.company_id, event)
-        self.state.ledger_events.append(event)
-        return event
 
     # ------------------------------------------------------------------
     # Report generation (Req 3.1, 3.5, 7.6)
@@ -824,12 +761,6 @@ class Manager:
                     return
             except Exception:
                 logger.warning("Failed to resolve consultation command", exc_info=True)
-
-            # 1. 予算チェック
-            if self.check_budget():
-                logger.warning("Budget exceeded, rejecting message")
-                self._slack_send("予算上限に達したため処理できません")
-                return
 
             if self.llm_client is None:
                 logger.error("LLM client not configured")
@@ -1458,22 +1389,7 @@ class Manager:
                         cwd=work_dir,
                     )
 
-                    # Record shell_exec event in ledger
-                    now = datetime.now(timezone.utc)
-                    shell_event = LedgerEvent(
-                        timestamp=now,
-                        event_type="shell_exec",
-                        agent_id="manager",
-                        task_id=task_id,
-                        estimated_cost_usd=0,
-                        metadata={
-                            "command": shell_result.command,
-                            "return_code": shell_result.return_code,
-                            "duration_seconds": shell_result.duration_seconds,
-                        },
-                    )
-                    append_ledger_event(self.base_dir, self.company_id, shell_event)
-                    self.state.ledger_events.append(shell_event)
+                    # Shell execution ledger tracking is disabled in minimal mode.
 
                     # Build follow-up message with shell result
                     result_text = self._format_shell_result(shell_result)
@@ -1705,6 +1621,18 @@ class Manager:
                             result_text = f"公開結果: {pub_result.message}"
                         else:
                             result_text = f"公開エラー: {pub_result.message}"
+
+                    elif operation == "self_commit":
+                        message = content[len("self_commit:"):].strip()
+                        if not message:
+                            result_text = "公開エラー: self_commit のメッセージが空です"
+                        else:
+                            repo_root = Path(os.environ.get("APP_REPO_PATH", "/opt/apps/ai-company"))
+                            pub_result = self.git_publisher.commit_and_push(repo_root, message)
+                            if pub_result.success:
+                                result_text = f"公開結果: {pub_result.message}"
+                            else:
+                                result_text = f"公開エラー: {pub_result.message}"
 
                     else:
                         result_text = f"公開エラー: 不明な操作形式です: {content}"
