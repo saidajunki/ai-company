@@ -381,6 +381,7 @@ class SubAgentRunner:
             f"- {company_root / 'state' / 'rolling_summary.md'}",
             f"- {company_root / 'state' / 'memory.sqlite3'}",
             f"- {company_root / 'state' / 'commitments.ndjson'}",
+            f"- {company_root / 'protocols' / 'mcp_servers.yaml'}",
             f"- {company_root / 'journal'}",
             "必要に応じて<shell>でファイル参照して構いません。",
         ]
@@ -401,6 +402,7 @@ class SubAgentRunner:
             "以下のタグを使って応答してください:",
             "<shell>実行するシェルコマンド</shell>",
             "<research>Web検索クエリ</research>",
+            "<mcp>MCPツール呼び出し（社内共通ツール）</mcp>",
             "<memory>社内メモリに残す内容</memory>",
             "<reply>報告テキスト</reply>",
             "<done>完了メッセージ</done>",
@@ -521,6 +523,20 @@ class SubAgentRunner:
                         result_text = "\n".join(parts)
                     else:
                         result_text = f"リサーチ結果 (query={query}): 検索結果なし"
+
+                    conversation.append({"role": "user", "content": result_text})
+                    needs_followup = True
+                    break
+                elif action.action_type == "mcp":
+                    self._log_activity(f"社員AIツール利用: name={agent_name} tool=mcp")
+                    payload = (action.content or "").strip()
+                    if not payload:
+                        continue
+                    try:
+                        result_text = self.manager.mcp_client.run_action(payload)
+                    except Exception as exc:
+                        logger.warning("Sub-agent MCP call failed: %s", exc, exc_info=True)
+                        result_text = f"MCP呼び出しエラー: {exc}"
 
                     conversation.append({"role": "user", "content": result_text})
                     needs_followup = True

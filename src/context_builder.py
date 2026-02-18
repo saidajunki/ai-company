@@ -56,6 +56,7 @@ def build_system_prompt(
     procedure_library_text: str | None = None,
     shared_procedure_text: str | None = None,
     sot_policy_text: str | None = None,
+    mcp_servers_text: str | None = None,
     **_unused,
 ) -> str:
     """Build system prompt with short-term + long-term memory context."""
@@ -90,6 +91,7 @@ def build_system_prompt(
         "- 手順SoT本体: /opt/apps/ai-company/data/companies/alpha/knowledge/procedures/",
         "- 共有手順SoT: /opt/apps/ai-company/data/companies/alpha/knowledge/shared/procedures/",
         "- 記憶ドメイン: /opt/apps/ai-company/data/companies/alpha/knowledge/domains/",
+        "- MCPサーバ設定: /opt/apps/ai-company/data/companies/alpha/protocols/mcp_servers.yaml",
         "- 再読込フラグ: /opt/apps/ai-company/data/companies/alpha/state/restart_manager.flag",
         "",
         "## 恒久方針",
@@ -128,6 +130,9 @@ def build_system_prompt(
                 "- 実行前に『どのSoTを根拠にしたか』を意識して判断する。"
             ),
         ),
+        "",
+        "## MCPサーバ（社内共通ツール）",
+        _format_optional_text(mcp_servers_text, fallback="（未設定）"),
         "",
         "## 自走エスカレーション規律",
         "- ブロッカー発生時は順に実行: ①社内SoT確認 ②Web一次情報の調査 ③高性能モデルの開発社員AIへ委任 ④未解決または高リスク時に<consult>。",
@@ -227,6 +232,10 @@ def _build_format_section() -> str:
         "<research>",
         "Web検索クエリ（最新情報/一次情報の確認に使う）",
         "</research>",
+        "",
+        "<mcp>",
+        "MCPツール呼び出し（JSONまたはYAML）例: server: vps-monitor / method: tools/list",
+        "</mcp>",
         "",
         "<publish>",
         "self_commit:message / commit:repo_path:message / create_repo:repo_name:description",

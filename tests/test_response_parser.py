@@ -219,6 +219,34 @@ class TestResearchTag:
 
 
 # ---------------------------------------------------------------------------
+# mcp タグ
+# ---------------------------------------------------------------------------
+
+class TestMcpTag:
+    """<mcp> タグの解析テスト."""
+
+    def test_parse_mcp_tag(self):
+        text = "<mcp>server: vps-monitor\nmethod: tools/list</mcp>"
+        actions = parse_response(text)
+        assert len(actions) == 1
+        assert actions[0].action_type == "mcp"
+        assert "vps-monitor" in actions[0].content
+
+    def test_parse_mcp_with_whitespace(self):
+        text = "<mcp>  list_containers  </mcp>"
+        actions = parse_response(text)
+        assert actions[0].content == "list_containers"
+
+    def test_format_mcp_roundtrip(self):
+        original = [Action(action_type="mcp", content="server: vps-monitor\nname: list_containers\narguments: {}")]
+        formatted = format_actions(original)
+        assert "<mcp>" in formatted
+        assert "</mcp>" in formatted
+        reparsed = parse_response(formatted)
+        assert reparsed == original
+
+
+# ---------------------------------------------------------------------------
 # publish タグ
 # ---------------------------------------------------------------------------
 
@@ -326,6 +354,7 @@ class TestMixedTags:
             Action(action_type="shell_command", content="ls"),
             Action(action_type="reply", content="hello"),
             Action(action_type="research", content="query"),
+            Action(action_type="mcp", content="server: vps-monitor\nmethod: tools/list"),
             Action(action_type="publish", content="artifact"),
             Action(action_type="consult", content="相談したいです"),
             Action(action_type="delegate", content="worker:タスク", model="google/gemini-2.5-flash"),

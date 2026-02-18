@@ -18,7 +18,7 @@ from artifact_verifier import ArtifactVerifier
 from consultation_policy import assess_creator_consultation, should_escalate_task_failure
 from context_builder import TaskHistoryContext
 from llm_client import LLMError
-from models import TaskEntry
+from models import TaskEntry, ResearchNote
 from priority_classifier import PriorityClassifier
 from response_parser import parse_response
 from shell_command_tracker import ShellCommandTracker
@@ -546,6 +546,53 @@ class AutonomousLoop:
                             logger.warning("Failed to persist task outcome", exc_info=True)
                         self._check_parent_completion(task)
                         return
+                    elif action.action_type == "research":
+                        query = (action.content or "").strip()
+                        if not query:
+                            continue
+                        try:
+                            search_results = self.manager.web_searcher.search(query)
+                        except Exception:
+                            logger.warning("Autonomous research failed: %s", query, exc_info=True)
+                            search_results = []
+
+                        now = datetime.now(timezone.utc)
+                        for sr in search_results:
+                            try:
+                                self.manager.research_note_store.save(ResearchNote(
+                                    query=query,
+                                    source_url=sr.url,
+                                    title=sr.title,
+                                    snippet=sr.snippet,
+                                    summary=sr.snippet,
+                                    retrieved_at=now,
+                                ))
+                            except Exception:
+                                logger.warning("Failed to save research note", exc_info=True)
+
+                        if search_results:
+                            parts = [f"リサーチ結果 (query={query}):"]
+                            for i, sr in enumerate(search_results, 1):
+                                parts.append(f"{i}. {sr.title}\n   {sr.url}\n   {sr.snippet}")
+                            result_text = "\n".join(parts)
+                        else:
+                            result_text = f"リサーチ結果 (query={query}): 検索結果なし"
+
+                        messages.append({"role": "user", "content": result_text})
+                        needs_followup = True
+                        break
+                    elif action.action_type == "mcp":
+                        payload = (action.content or "").strip()
+                        if not payload:
+                            continue
+                        try:
+                            result_text = self.manager.mcp_client.run_action(payload)
+                        except Exception as exc:
+                            logger.warning("Autonomous MCP call failed: %s", exc, exc_info=True)
+                            result_text = f"MCP呼び出しエラー: {exc}"
+                        messages.append({"role": "user", "content": result_text})
+                        needs_followup = True
+                        break
                     elif action.action_type == "shell_command":
                         shell_result = execute_shell(command=action.content, cwd=work_dir)
                         shell_tracker.record(action.content, shell_result.return_code)

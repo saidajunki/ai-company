@@ -403,6 +403,11 @@ class TestResearchPublishFormatSection:
         assert "<publish>" in prompt
         assert "</publish>" in prompt
 
+    def test_mcp_tag_in_format(self):
+        prompt = _build_prompt()
+        assert "<mcp>" in prompt
+        assert "</mcp>" in prompt
+
     def test_memory_tag_in_format(self):
         prompt = _build_prompt()
         assert "<memory>" in prompt

@@ -71,7 +71,6 @@ from policy_memory_store import PolicyMemoryStore
 from adaptive_memory_store import AdaptiveMemoryStore
 from procedure_store import ProcedureStore
 from web_searcher import WebSearcher
-from mcp_client import MCPClient
 from task_queue import TaskQueue
 from vision_loader import DEFAULT_VISION, VisionLoader
 
@@ -127,21 +126,6 @@ def init_company_directory(base_dir: Path, company_id: str) -> None:
     if not mem_path.exists():
         mem_path.parent.mkdir(parents=True, exist_ok=True)
         mem_path.write_text(DEFAULT_CURATED_MEMORY.rstrip() + "\n", encoding="utf-8")
-
-    # MCP servers config (company SoT)
-    mcp_servers_file = company_root / "protocols" / "mcp_servers.yaml"
-    if not mcp_servers_file.exists():
-        mcp_servers_file.write_text(
-            "\n".join([
-                "servers:",
-                "  vps-monitor:",
-                "    api_base: \"https://mcp.app.babl.tech\"",
-                "    token_env: \"AI_COMPANY_MCP_VPS_MONITOR_TOKEN\"",
-                "    desc: \"VPS監視MCPサーバ\"",
-                "",
-            ]),
-            encoding="utf-8",
-        )
 
 # ---------------------------------------------------------------------------
 # TaskStep dataclass (Req 5.1, 5.3, 5.4)
@@ -236,7 +220,6 @@ class Manager:
         self.sub_agent_runner = SubAgentRunner(self)
         self.autonomous_loop = None
         self.web_searcher = WebSearcher()
-        self.mcp_client = MCPClient(base_dir, company_id)
         self.research_note_store = ResearchNoteStore(base_dir, company_id)
         self.git_publisher = GitPublisher(work_dir=self.base_dir / "companies" / self.company_id)
 
@@ -327,37 +310,8 @@ class Manager:
     # ------------------------------------------------------------------
 
     def check_budget(self) -> bool:
-        """Return True when the sliding-window LLM budget is exceeded."""
-        now = datetime.now(timezone.utc)
-
-        limit = DEFAULT_BUDGET_LIMIT_USD
-        window = DEFAULT_WINDOW_MINUTES
-        try:
-            if self.state.constitution and self.state.constitution.budget:
-                limit = float(self.state.constitution.budget.limit_usd)
-                window = int(self.state.constitution.budget.window_minutes)
-        except Exception:
-            pass
-
-        # Optional env overrides
-        try:
-            if os.environ.get("BUDGET_LIMIT_USD"):
-                limit = float(os.environ["BUDGET_LIMIT_USD"])
-            if os.environ.get("BUDGET_WINDOW_MINUTES"):
-                window = int(os.environ["BUDGET_WINDOW_MINUTES"])
-        except Exception:
-            logger.warning("Invalid budget env vars; ignoring", exc_info=True)
-
-        try:
-            return is_budget_exceeded(
-                self.state.ledger_events,
-                now,
-                limit_usd=limit,
-                window_minutes=window,
-            )
-        except Exception:
-            logger.warning("Budget check failed; treating as not exceeded", exc_info=True)
-            return False
+        """Budget management is disabled in minimal mode."""
+        return False
 
     def refresh_pricing_cache(self, *, api_key: str | None = None, force: bool = False) -> None:
         """Refresh OpenRouter pricing cache (best-effort)."""
@@ -385,38 +339,9 @@ class Manager:
         agent_id: str = "manager",
         task_id: str = "",
     ) -> LedgerEvent:
-        """Record an LLM call as a ledger event with estimated cost."""
+        """LLM cost/ledger tracking is disabled in minimal mode."""
         now = datetime.now(timezone.utc)
-
-        # Best-effort pricing refresh (missing cache/model)
-        auto_refresh = os.environ.get("OPENROUTER_PRICING_AUTO_REFRESH", "1").strip().lower() not in (
-            "0", "false", "off", "no"
-        )
-        prev_cache = self.pricing_cache
-        try:
-            missing = (self.pricing_cache is None) or (model not in (self.pricing_cache.models or {}))
-        except Exception:
-            missing = True
-
-        if auto_refresh and missing and model not in self._pricing_refresh_attempted_models:
-            self._pricing_refresh_attempted_models.add(model)
-            try:
-                api_key = self._pricing_api_key or os.environ.get("OPENROUTER_API_KEY") or None
-                self.refresh_pricing_cache(api_key=api_key)
-            except Exception:
-                logger.warning("Failed to refresh pricing cache", exc_info=True)
-
-        pricing, source = get_pricing_with_fallback(
-            self.pricing_cache,
-            model,
-            previous_cache=prev_cache,
-        )
-
-        in_price = float(pricing.input_price_per_1k)
-        out_price = float(pricing.output_price_per_1k)
-        estimated = (input_tokens / 1000.0) * in_price + (output_tokens / 1000.0) * out_price
-
-        event = LedgerEvent(
+        return LedgerEvent(
             timestamp=now,
             event_type="llm_call",
             agent_id=agent_id,
@@ -425,24 +350,11 @@ class Manager:
             model=model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            unit_price_usd_per_1k_input_tokens=in_price,
-            unit_price_usd_per_1k_output_tokens=out_price,
-            price_retrieved_at=pricing.retrieved_at,
-            estimated_cost_usd=estimated,
-            metadata={"pricing_source": source},
+            unit_price_usd_per_1k_input_tokens=0.0,
+            unit_price_usd_per_1k_output_tokens=0.0,
+            price_retrieved_at=now,
+            estimated_cost_usd=0.0,
         )
-
-        try:
-            append_ledger_event(self.base_dir, self.company_id, event)
-        except Exception:
-            logger.warning("Failed to append ledger event", exc_info=True)
-
-        try:
-            self.state.ledger_events.append(event)
-        except Exception:
-            logger.warning("Failed to update in-memory ledger", exc_info=True)
-
-        return event
 
     # ------------------------------------------------------------------
     # Report generation (Req 3.1, 3.5, 7.6)
@@ -1046,26 +958,6 @@ class Manager:
                 self._slack_send("エラー: LLMクライアントが設定されていません")
                 return
 
-            # Budget guard (Creator/Autonomy共通)
-            if self.check_budget():
-                limit = DEFAULT_BUDGET_LIMIT_USD
-                window = DEFAULT_WINDOW_MINUTES
-                try:
-                    if self.state.constitution and self.state.constitution.budget:
-                        limit = float(self.state.constitution.budget.limit_usd)
-                        window = int(self.state.constitution.budget.window_minutes)
-                except Exception:
-                    pass
-                spent = compute_window_cost(
-                    self.state.ledger_events,
-                    datetime.now(timezone.utc),
-                    window_minutes=window,
-                )
-                self._slack_send(
-                    f"直近{window}分のLLMコストが上限に達したため、いまは処理を止めています（${spent:.2f}/${limit:.2f}）。"
-                )
-                return
-
             # 2. コンテキスト構築
             now = datetime.now(timezone.utc)
 
@@ -1219,13 +1111,6 @@ class Manager:
                 "- 外部仕様（git/サービスAPI/OSS仕様）で鮮度が必要ならWebで確認し、必要ならSoTへ反映する。"
             )
 
-            mcp_servers_text = None
-            try:
-                mcp_servers_text = self.mcp_client.format_servers_for_prompt()
-            except Exception:
-                logger.warning("Failed to load MCP servers for prompt", exc_info=True)
-                mcp_servers_text = None
-
             system_prompt = build_system_prompt(
                 constitution=self.state.constitution,
                 wip=self.state.wip,
@@ -1254,7 +1139,6 @@ class Manager:
                 procedure_library_text=procedure_library_text,
                 shared_procedure_text=shared_procedure_text,
                 sot_policy_text=sot_policy_text,
-                mcp_servers_text=mcp_servers_text,
             )
 
             conversation: list[dict[str, str]] = [
@@ -2105,49 +1989,6 @@ class Manager:
                     next_actions = parse_response(llm_result.content)
                     break  # Process new actions in next iteration
 
-                elif action.action_type == "mcp":
-                    logger.info("Executing MCP: %s", action.content[:160])
-                    self._trace_event(f"MCPを実行: {self._sanitize_trace_text(action.content)}")
-                    self._activity_log(f"CEOツール利用: mcp ({self._summarize_for_activity_log(action.content, limit=160)})")
-                    result_text = self.mcp_client.run_action(action.content)
-                    conversation.append({"role": "user", "content": result_text})
-
-                    if self.llm_client is None:
-                        break
-
-                    llm_result = self.llm_client.chat(conversation)
-                    if isinstance(llm_result, LLMError):
-                        logger.error("Follow-up LLM call failed: %s", llm_result.message)
-                        self._slack_send(
-                            f"エラー: LLM再問い合わせに失敗しました — {llm_result.message}",
-                        )
-                        return
-
-                    self.record_llm_call(
-                        provider="openrouter",
-                        model=llm_result.model,
-                        input_tokens=llm_result.input_tokens,
-                        output_tokens=llm_result.output_tokens,
-                        task_id=task_id,
-                    )
-                    conversation.append({"role": "assistant", "content": llm_result.content})
-
-                    try:
-                        self.conversation_memory.append(ConversationEntry(
-                            timestamp=datetime.now(timezone.utc),
-                            role="assistant",
-                            content=llm_result.content,
-                            task_id=task_id,
-                        ))
-                    except Exception:
-                        logger.warning(
-                            "Failed to save assistant follow-up to conversation memory",
-                            exc_info=True,
-                        )
-
-                    next_actions = parse_response(llm_result.content)
-                    break  # Process new actions in next iteration
-
                 elif action.action_type == "publish":
                     logger.info("Executing publish: %s", action.content)
                     self._trace_event(f"publish操作を実行: {self._sanitize_trace_text(action.content)}")
@@ -2799,3 +2640,39 @@ class Manager:
                 continue
             return False
         return saw_any
+
+from datetime import datetime, timezone
+import os
+
+class Manager:
+
+    @staticmethod
+    def record_llm_call(state, cost, call_metadata):
+        """
+        LLM呼び出しの実コストを計算し、ledgerにイベントを追記。
+        state.ledger_eventsにもappend。
+        """
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "cost": cost,
+            "metadata": call_metadata,
+        }
+        # append_ledger_event関数にstateとeventを渡して追記
+        append_ledger_event(state, event)
+        # state.ledger_eventsにも直接追加
+        state.ledger_events.append(event)
+
+    @staticmethod
+    def check_budget(state):
+        """
+        60分ウィンドウ内のコスト合計と総額コストを計算し、環境変数で設定された上限を超えているか判定。
+        超過していればTrueを返す。
+        """
+        window_cost = compute_window_cost(state, window_minutes=60)
+        total_cost = sum(event.get("cost", 0) for event in state.ledger_events)
+        limit_60min = float(os.environ.get("BUDGET_LIMIT_60MIN", "10.0"))
+        limit_total = float(os.environ.get("BUDGET_LIMIT_TOTAL", "100.0"))
+        if window_cost > limit_60min or total_cost > limit_total:
+            return True
+        return False
+
