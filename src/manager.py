@@ -725,6 +725,28 @@ class Manager:
                 self._slack_send(self.generate_daily_brief())
                 return
 
+            normalized = stripped.replace(" ", "").replace("　", "")
+            asks_prompt_location = (
+                "システムプロンプト" in normalized
+                and any(k in normalized for k in ("どこ", "どのファイル", "場所", "ファイル"))
+            )
+            asks_logic_location = (
+                "ロジック" in normalized
+                and any(k in normalized for k in ("どこ", "どのファイル", "場所", "確認"))
+            )
+            if asks_prompt_location or asks_logic_location:
+                repo_root = Path(os.environ.get("APP_REPO_PATH", "/opt/apps/ai-company"))
+                restart_flag = self.base_dir / "companies" / self.company_id / "state" / "restart_manager.flag"
+                self._slack_send(
+                    "私の実体ファイルは以下です。\n"
+                    f"- システムプロンプト: `{repo_root}/src/context_builder.py` の `build_system_prompt()`\n"
+                    f"- 読み込み元: `{repo_root}/src/manager.py` の `process_message()`\n"
+                    f"- 主要ロジック: `{repo_root}/src/`\n"
+                    f"- 再読込フラグ: `{restart_flag}`\n\n"
+                    "必要なら私自身がコード編集→self_commit→再読込まで実行できます。"
+                )
+                return
+
             # Creator score feedback (KPI loop)
             review = parse_creator_review(text, user_id=user_id)
             if review is not None:
