@@ -33,7 +33,15 @@ class TaskQueue:
                 return t
         return None
 
-    def add(self, description: str, priority: int = 3, agent_id: str = "ceo", source: str = "autonomous") -> TaskEntry:
+    def add(
+        self,
+        description: str,
+        priority: int = 3,
+        agent_id: str = "ceo",
+        source: str = "autonomous",
+        slack_channel: str | None = None,
+        slack_thread_ts: str | None = None,
+    ) -> TaskEntry:
         """新しいタスクを追加する. Returns the created TaskEntry."""
         if source != "creator":
             existing = self._find_existing_active(description)
@@ -50,6 +58,8 @@ class TaskQueue:
             updated_at=now,
             agent_id=agent_id,
             source=source,
+            slack_channel=slack_channel,
+            slack_thread_ts=slack_thread_ts,
         )
         ndjson_append(self._path, entry)
         return entry
@@ -61,6 +71,8 @@ class TaskQueue:
         agent_id: str = "ceo",
         parent_task_id: str | None = None,
         source: str = "autonomous",
+        slack_channel: str | None = None,
+        slack_thread_ts: str | None = None,
     ) -> TaskEntry:
         """新しいタスクを依存関係・親タスクID付きで追加する."""
         if source != "creator":
@@ -80,6 +92,8 @@ class TaskQueue:
             depends_on=depends_on,
             parent_task_id=parent_task_id,
             source=source,
+            slack_channel=slack_channel,
+            slack_thread_ts=slack_thread_ts,
         )
         ndjson_append(self._path, entry)
         return entry

@@ -10,6 +10,7 @@ Requirements: 7.1, 7.2, 7.6
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -184,6 +185,17 @@ class Manager:
         self._trace_enabled = os.environ.get("SLACK_TRACE_ENABLED", "1").strip().lower() not in ("0", "false", "off", "no")
         self._activity_log_enabled = os.environ.get("SLACK_ACTIVITY_LOG_ENABLED", "1").strip().lower() not in ("0", "false", "off", "no")
         self._activity_log_channel = os.environ.get("SLACK_ACTIVITY_LOG_CHANNEL", "C0AFPAYTLP4").strip() or None
+        self._slack_default_channel = (
+            os.environ.get("SLACK_DEFAULT_CHANNEL_ID", "").strip()
+            or os.environ.get("SLACK_CHANNEL_ID", "").strip()
+            or None
+        )
+        self._slack_context_path = self.base_dir / "companies" / self.company_id / "state" / "slack_context.json"
+        self._slack_last_channel: str | None = None
+        self._slack_last_thread_ts: str | None = None
+        self._load_slack_context()
+        if self._slack_default_channel is None and self._slack_last_channel:
+            self._slack_default_channel = self._slack_last_channel
 
         # Conversation memory (Req 1.1, 1.5)
         self.conversation_memory = ConversationMemory(base_dir, company_id)
@@ -761,6 +773,7 @@ class Manager:
         self._slack_reply_channel = slack_channel
         self._slack_reply_thread_ts = slack_thread_ts
         self._trace_thread_ts = slack_thread_ts
+        self._remember_slack_context(slack_channel, slack_thread_ts)
         try:
             stripped = (text or "").strip()
             self._bootstrap_trace_thread(stripped)
@@ -1763,7 +1776,8 @@ class Manager:
                     break
 
                 elif action.action_type == "done":
-                    self._slack_send(f"完了: {action.content}")
+                    content = (action.content or "").strip()
+                    self._slack_send(content or "完了しました。")
 
                 elif action.action_type == "shell_command":
                     logger.info("Executing shell: %s", action.content)
@@ -2221,7 +2235,13 @@ class Manager:
             return
 
         # 親タスクを登録
-        parent = self.task_queue.add(description=f"[親] {task_description}", priority=1, source="creator")
+        parent = self.task_queue.add(
+            description=f"[親] {task_description}",
+            priority=1,
+            source="creator",
+            slack_channel=self._slack_reply_channel,
+            slack_thread_ts=self._slack_reply_thread_ts,
+        )
 
         # サブタスクを依存関係付きで登録
         task_id_map: dict[int, str] = {}  # plan内番号 → 実際のtask_id
@@ -2233,11 +2253,13 @@ class Manager:
                 parent_task_id=parent.task_id,
                 priority=1,
                 source="creator",
+                slack_channel=self._slack_reply_channel,
+                slack_thread_ts=self._slack_reply_thread_ts,
             )
             task_id_map[st.index] = entry.task_id
 
         # Creatorに報告
-        self._slack_send(f"📋 タスク分解完了 ({len(subtasks)}件のサブタスク)")
+        self._slack_send(f"タスクを{len(subtasks)}件に分解しました。完了時に報告します。")
 
 
     # ------------------------------------------------------------------
@@ -2440,6 +2462,44 @@ class Manager:
             return None, source_path
         return int(m.group(1)), source_path
 
+    def _load_slack_context(self) -> None:
+        """Load last known Slack context (best-effort) for autonomous reports."""
+        try:
+            if not self._slack_context_path.exists():
+                return
+            raw = self._slack_context_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return
+            channel = (data.get("channel") or "").strip() or None
+            thread_ts = (data.get("thread_ts") or "").strip() or None
+            self._slack_last_channel = channel
+            self._slack_last_thread_ts = thread_ts
+        except Exception:
+            logger.warning("Failed to load Slack context", exc_info=True)
+
+    def _persist_slack_context(self) -> None:
+        """Persist last known Slack context (best-effort)."""
+        try:
+            self._slack_context_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "channel": self._slack_last_channel,
+                "thread_ts": self._slack_last_thread_ts,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._slack_context_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            logger.warning("Failed to persist Slack context", exc_info=True)
+
+    def _remember_slack_context(self, channel: str | None, thread_ts: str | None) -> None:
+        """Remember Slack context for later autonomous completion reports."""
+        ch = (channel or "").strip() or None
+        if not ch:
+            return
+        self._slack_last_channel = ch
+        self._slack_last_thread_ts = (thread_ts or "").strip() or None
+        self._persist_slack_context()
+
     def _bootstrap_trace_thread(self, request_text: str) -> None:
         if not self._trace_enabled or self.slack is None:
             return
@@ -2514,7 +2574,10 @@ class Manager:
     ) -> str | None:
         """Send a message via Slack if the bot is configured."""
         if self.slack is not None:
-            target_channel = channel or self._slack_reply_channel
+            target_channel = channel or self._slack_reply_channel or self._slack_default_channel or self._slack_last_channel
+            if not target_channel:
+                logger.warning("Slack channel missing; message not sent: %s", text[:100])
+                return None
             if target_channel and target_channel != self._activity_log_channel:
                 self._activity_log(f"CEO→Creator: {self._summarize_for_activity_log(text, limit=700)}")
             return self.slack.send_message(

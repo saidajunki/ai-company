@@ -223,6 +223,8 @@ class TaskEntry(BaseModel):
     result: Optional[str] = None
     error: Optional[str] = None
     agent_id: str = "ceo"
+    slack_channel: Optional[str] = None
+    slack_thread_ts: Optional[str] = None
     depends_on: List[str] = Field(default_factory=list)
     quality_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     quality_notes: Optional[str] = None

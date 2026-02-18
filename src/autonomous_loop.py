@@ -374,7 +374,7 @@ class AutonomousLoop:
                         task.task_id, "failed", error="予算超過"
                     )
                     self._check_parent_completion(task)
-                    self._report(f"タスク中断(予算超過): {task.description}")
+                    self._report(f"タスク中断(予算超過): {task.description}", task=task)
                     return
 
                 # Creator指示などでpaused/canceledに変わった場合は即中断
@@ -384,7 +384,7 @@ class AutonomousLoop:
                     latest = None
                 if latest is not None and latest.status in ("paused", "canceled"):
                     self._check_parent_completion(task)
-                    self._report(f"タスク中断({latest.status}): {task.description}")
+                    self._report(f"タスク中断({latest.status}): {task.description}", task=task)
                     return
 
                 result = self.manager.llm_client.chat(messages)
@@ -416,11 +416,12 @@ class AutonomousLoop:
                             )
                             if created:
                                 self._report(
-                                    f"🚨 エスカレーション [consult_id: {entry.consultation_id}]\n\n{consult_text}"
+                                    f"🚨 エスカレーション [consult_id: {entry.consultation_id}]\n\n{consult_text}",
+                                    task=task,
                                 )
                         except Exception:
                             logger.warning("Failed to create LLM availability consultation", exc_info=True)
-                    self._report(f"タスク失敗(LLMエラー): {task.description}")
+                    self._report(f"タスク失敗(LLMエラー): {task.description}", task=task)
                     return
 
                 # Record cost
@@ -445,7 +446,7 @@ class AutonomousLoop:
                     if action.action_type == "done":
                         done_result = action.content
                     elif action.action_type == "reply":
-                        self._report(action.content)
+                        self._report(action.content, task=task)
                     elif action.action_type == "consult":
                         consult_text = action.content.strip()
                         assessment = assess_creator_consultation(
@@ -481,7 +482,8 @@ class AutonomousLoop:
                             )
                             if created:
                                 self._report(
-                                    f"🤝 相談 [consult_id: {entry.consultation_id}]\n\n{consult_text}"
+                                    f"🤝 相談 [consult_id: {entry.consultation_id}]\n\n{consult_text}",
+                                    task=task,
                                 )
                             else:
                                 logger.info(
@@ -490,7 +492,7 @@ class AutonomousLoop:
                                     task.task_id,
                                 )
                         except Exception:
-                            self._report(f"🤝 相談\n\n{consult_text}")
+                            self._report(f"🤝 相談\n\n{consult_text}", task=task)
                         self.manager.task_queue.update_status(
                             task.task_id, "failed", error="相談待ち"
                         )
@@ -570,7 +572,7 @@ class AutonomousLoop:
                         except Exception:
                             logger.warning("Failed to persist task outcome", exc_info=True)
                         self._check_parent_completion(task)
-                        self._report(f"タスク失敗(全コマンド失敗): {task.description}\n{error_msg}")
+                        self._report(f"タスク失敗(全コマンド失敗): {task.description}\n{error_msg}", task=task)
                         return
 
                     # Step 2: Artifact verification (Req 3.1, 3.2, 3.3)
@@ -614,7 +616,7 @@ class AutonomousLoop:
                             except Exception:
                                 logger.warning("Failed to persist task outcome", exc_info=True)
                             self._check_parent_completion(task)
-                            self._report(f"タスク失敗(成果物欠損): {task.description}\n{error_msg}")
+                            self._report(f"タスク失敗(成果物欠損): {task.description}\n{error_msg}", task=task)
                             return
 
                     # Step 3: Quality Gate - always active (Req 1.1, 5.1, 5.2)
@@ -648,7 +650,8 @@ class AutonomousLoop:
                         self._check_parent_completion(task)
                         self._report(
                             f"タスク品質不足: {task.description}\n"
-                            f"スコア: {q_score:.2f} — {q_notes}"
+                            f"スコア: {q_score:.2f} — {q_notes}",
+                            task=task,
                         )
                     else:
                         self.manager.task_queue.update_status(
@@ -671,7 +674,7 @@ class AutonomousLoop:
                                 mm.ingest_all_sources()
                         except Exception:
                             logger.warning("Failed to persist task outcome", exc_info=True)
-                        self._report(f"タスク完了: {task.description}\n結果: {done_result}")
+                        self._report(f"タスク完了: {task.description}\n結果: {done_result}", task=task)
                         self._check_initiative_completion(task.task_id)
                         self._check_parent_completion(task)
                     return
@@ -694,7 +697,7 @@ class AutonomousLoop:
                             mm.ingest_all_sources()
                     except Exception:
                         logger.warning("Failed to persist task outcome", exc_info=True)
-                    self._report(f"タスク完了: {task.description}")
+                    self._report(f"タスク完了: {task.description}", task=task)
                     self._check_initiative_completion(task.task_id)
                     self._check_parent_completion(task)
                     return
@@ -717,7 +720,7 @@ class AutonomousLoop:
             except Exception:
                 logger.warning("Failed to persist task outcome", exc_info=True)
             self._check_parent_completion(task)
-            self._report(f"タスク中断(最大ターン数): {task.description}")
+            self._report(f"タスク中断(最大ターン数): {task.description}", task=task)
 
         except Exception as exc:
             logger.exception("Error executing task %s", task.task_id)
@@ -728,7 +731,7 @@ class AutonomousLoop:
             except Exception:
                 logger.warning("Failed to update task status to failed", exc_info=True)
             self._check_parent_completion(task)
-            self._report(f"タスク失敗(エラー): {task.description}")
+            self._report(f"タスク失敗(エラー): {task.description}", task=task)
 
     def _get_wip_limit(self) -> int:
         """WIP制限を取得する."""
@@ -815,10 +818,15 @@ class AutonomousLoop:
 
         return score, notes
 
-    def _report(self, message: str) -> None:
-        """Slackに結果を報告する."""
+    def _report(self, message: str, *, task: TaskEntry | None = None) -> None:
+        """Slackに結果を報告する.
+
+        Creator起因タスクは、可能なら元のSlackスレッドへ返信する。
+        """
         try:
-            self.manager._slack_send(message)
+            channel = getattr(task, "slack_channel", None) if task is not None else None
+            thread_ts = getattr(task, "slack_thread_ts", None) if task is not None else None
+            self.manager._slack_send(message, channel=channel, thread_ts=thread_ts)
         except Exception:
             logger.warning("Failed to send report: %s", message, exc_info=True)
 
@@ -847,7 +855,8 @@ class AutonomousLoop:
                     self._check_parent_completion(task)
                     self._report(
                         f"⏰ タスクタイムアウト: {task.description[:60]}\n"
-                        f"({int(elapsed)}秒間進捗なし → failed)"
+                        f"({int(elapsed)}秒間進捗なし → failed)",
+                        task=task,
                     )
                 except Exception:
                     logger.exception("Failed to reap stuck task %s", task.task_id)
@@ -891,7 +900,8 @@ class AutonomousLoop:
             )
             if created:
                 self._report(
-                    f"🚨 エスカレーション [consult_id: {entry.consultation_id}]\n\n{content}"
+                    f"🚨 エスカレーション [consult_id: {entry.consultation_id}]\n\n{content}",
+                    task=task,
                 )
             else:
                 logger.info(
@@ -901,7 +911,7 @@ class AutonomousLoop:
                 )
         except Exception:
             logger.warning("Failed to escalate task %s", task.task_id, exc_info=True)
-            self._report(f"🚨 エスカレーション\n\n{content}")
+            self._report(f"🚨 エスカレーション\n\n{content}", task=task)
 
         # エスカレーション済みマーカーを付けて再処理を防止
         try:
