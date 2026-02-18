@@ -179,6 +179,8 @@ class Manager:
         self.slack: "SlackBot | None" = None  # noqa: F821 — forward ref
         self._slack_reply_channel: str | None = None
         self._slack_reply_thread_ts: str | None = None
+        self._trace_thread_ts: str | None = None
+        self._trace_enabled = os.environ.get("SLACK_TRACE_ENABLED", "1").strip().lower() not in ("0", "false", "off", "no")
 
         # Conversation memory (Req 1.1, 1.5)
         self.conversation_memory = ConversationMemory(base_dir, company_id)
@@ -752,10 +754,14 @@ class Manager:
 
         prev_channel = self._slack_reply_channel
         prev_thread = self._slack_reply_thread_ts
+        prev_trace_thread = self._trace_thread_ts
         self._slack_reply_channel = slack_channel
         self._slack_reply_thread_ts = slack_thread_ts
+        self._trace_thread_ts = slack_thread_ts
         try:
             stripped = (text or "").strip()
+            self._bootstrap_trace_thread(stripped)
+            self._trace_event("依頼を受信。意図解析を開始")
 
             # Ingest policy/rule/budget memories from incoming conversation
             try:
@@ -818,6 +824,7 @@ class Manager:
 
             # --- Fast paths (no LLM required) ---
             if stripped in ("日報", "creator日報", "daily", "daily brief", "daily report"):
+                self._trace_event("fast-path: 日報生成")
                 self._slack_send(self.generate_daily_brief())
                 return
 
@@ -831,6 +838,7 @@ class Manager:
                 and any(k in normalized for k in ("どこ", "どのファイル", "場所", "確認"))
             )
             if asks_prompt_location or asks_logic_location:
+                self._trace_event("fast-path: 実体ファイル照会")
                 repo_root = Path(os.environ.get("APP_REPO_PATH", "/opt/apps/ai-company"))
                 restart_flag = self.base_dir / "companies" / self.company_id / "state" / "restart_manager.flag"
                 self._slack_send(
@@ -844,15 +852,31 @@ class Manager:
                 )
                 return
 
+            if self._is_max_turns_question(stripped):
+                self._trace_event("ソースコード確認中: /opt/apps/ai-company/src/autonomous_loop.py")
+                max_turns, source_path = self._read_max_task_turns_from_source()
+                if max_turns is None:
+                    self._slack_send("最大会話ターン数の設定値をコードから取得できませんでした。")
+                else:
+                    self._trace_event(f"設定値を確認: MAX_TASK_TURNS={max_turns}")
+                    self._slack_send(
+                        f"現在の最大会話ターン数は `{max_turns}` です。\n"
+                        f"定義箇所: `{source_path}`"
+                    )
+                return
+
             if self._is_agent_list_request(stripped):
+                self._trace_event("fast-path: 社員AI一覧を生成")
                 self._slack_send(self._build_agent_list_reply(stripped))
                 return
 
             if self._is_procedure_library_request(stripped):
+                self._trace_event("fast-path: 手順SoTライブラリ照会")
                 self._slack_send(self._build_procedure_library_reply())
                 return
             recalled_procedure = self.procedure_store.find_best_for_request(stripped)
             if recalled_procedure is not None:
+                self._trace_event("fast-path: 手順SoTを再掲")
                 self._slack_send(self.procedure_store.render_reply(recalled_procedure))
                 return
 
@@ -1087,6 +1111,8 @@ class Manager:
             ]
 
             # 3. LLM呼び出し
+            model_name = getattr(self.llm_client, "model", "unknown")
+            self._trace_event(f"LLM推論を開始 (model={model_name})")
             llm_result = self.llm_client.chat(conversation)
 
             if isinstance(llm_result, LLMError):
@@ -1111,6 +1137,11 @@ class Manager:
 
             # 5. 応答パース
             actions = parse_response(llm_result.content)
+            if actions:
+                action_list = ", ".join(a.action_type for a in actions)
+                self._trace_event(f"実行アクションを決定: {action_list}")
+            else:
+                self._trace_event("実行アクションなし（直接応答）")
             conversation.append({"role": "assistant", "content": llm_result.content})
 
             # Save assistant response to conversation memory (Req 1.5)
@@ -1168,6 +1199,7 @@ class Manager:
         finally:
             self._slack_reply_channel = prev_channel
             self._slack_reply_thread_ts = prev_thread
+            self._trace_thread_ts = prev_trace_thread
 
     def _apply_creator_directive(self, directive: CreatorDirective, *, user_id: str) -> bool:
         """Apply Creator's pause/cancel/resume instruction to task/initiative state.
@@ -1326,6 +1358,8 @@ class Manager:
             next_actions: list[Action] = []
 
             for action in actions:
+                self._trace_event(f"アクション実行: {action.action_type}")
+
                 if action.action_type == "reply":
                     if suppress_ack_reply and self._looks_like_memory_ack_payload(action.content):
                         logger.info("Skipping ack-like reply in memory guard path (task_id=%s)", task_id)
@@ -1335,6 +1369,7 @@ class Manager:
 
                 elif action.action_type == "control":
                     logger.info("Control action received: %s", action.content[:120])
+                    self._trace_event(f"control指示を適用: {self._sanitize_trace_text(action.content)}")
                     for line in action.content.splitlines():
                         cmd = line.strip()
                         if not cmd:
@@ -1350,6 +1385,7 @@ class Manager:
 
                 elif action.action_type == "memory":
                     logger.info("Memory action received: %s", action.content[:120])
+                    self._trace_event(f"記憶更新を実行: {self._sanitize_trace_text(action.content)}")
                     raw = (action.content or "").strip()
                     if not raw:
                         continue
@@ -1628,6 +1664,7 @@ class Manager:
 
                 elif action.action_type == "shell_command":
                     logger.info("Executing shell: %s", action.content)
+                    self._trace_event(f"シェル実行中: {self._sanitize_trace_text(action.content)}")
                     shell_result = execute_shell(
                         command=action.content,
                         cwd=work_dir,
@@ -1679,6 +1716,7 @@ class Manager:
 
                 elif action.action_type == "consult":
                     logger.info("Consultation requested: %s", action.content[:120])
+                    self._trace_event(f"consult判定中: {self._sanitize_trace_text(action.content)}")
                     consult_text = action.content.strip()
                     assessment = assess_creator_consultation(
                         consult_text,
@@ -1763,6 +1801,7 @@ class Manager:
 
                 elif action.action_type == "research":
                     logger.info("Executing research: %s", action.content)
+                    self._trace_event(f"Web検索を実行: {self._sanitize_trace_text(action.content)}")
                     search_results = self.web_searcher.search(action.content)
 
                     # Save each result as a ResearchNote
@@ -1832,6 +1871,7 @@ class Manager:
 
                 elif action.action_type == "publish":
                     logger.info("Executing publish: %s", action.content)
+                    self._trace_event(f"publish操作を実行: {self._sanitize_trace_text(action.content)}")
                     content = action.content.strip()
                     parts = content.split(":", 2)
                     operation = parts[0] if parts else ""
@@ -1957,6 +1997,9 @@ class Manager:
                         "【依頼本文】",
                         desc,
                     ])
+                    model_hint = action.model or "auto"
+                    self._trace_event(f"社員AIへ委任: role={role} model={model_hint}")
+                    self._trace_event("社員AIへの指示:\n```\n" + self._sanitize_trace_text(delegation_brief[:1600]) + "\n```")
 
                     try:
                         result = self.sub_agent_runner.spawn(
@@ -2163,22 +2206,93 @@ class Manager:
             "必要な作業名を指定してくれれば、該当手順だけ再掲します。"
         )
 
+    @staticmethod
+    def _is_max_turns_question(text: str) -> bool:
+        normalized = (text or "").replace(" ", "").replace("　", "").lower()
+        if not normalized:
+            return False
+        has_target = any(k in normalized for k in ("最大会話ターン数", "最大ターン数", "max_task_turns", "maxturn"))
+        has_question = any(k in normalized for k in ("何", "いくつ", "教えて", "確認", "設定", "値", "なっていますか", "ですか"))
+        return has_target and has_question
+
+    def _read_max_task_turns_from_source(self) -> tuple[int | None, str]:
+        import re
+
+        target = Path(os.environ.get("APP_REPO_PATH", "/opt/apps/ai-company")) / "src" / "autonomous_loop.py"
+        source_path = str(target)
+        try:
+            content = target.read_text(encoding="utf-8")
+        except Exception:
+            logger.warning("Failed to read max turns source: %s", source_path, exc_info=True)
+            return None, source_path
+        m = re.search(r"^MAX_TASK_TURNS\s*=\s*(\d+)\s*$", content, re.MULTILINE)
+        if not m:
+            return None, source_path
+        return int(m.group(1)), source_path
+
+    def _bootstrap_trace_thread(self, request_text: str) -> None:
+        if not self._trace_enabled or self.slack is None:
+            return
+        if self._slack_reply_thread_ts:
+            self._trace_thread_ts = self._slack_reply_thread_ts
+            return
+        if not self._slack_reply_channel:
+            return
+
+        excerpt = " ".join((request_text or "").split())
+        if len(excerpt) > 120:
+            excerpt = excerpt[:120] + "…"
+        header = f"🧭 処理ログ開始\n質問: {excerpt or '(empty)'}"
+        ts = self.slack.send_message(header, channel=self._slack_reply_channel)
+        if ts:
+            self._trace_thread_ts = ts
+            self._slack_reply_thread_ts = ts
+
+    def _trace_event(self, message: str) -> None:
+        if not self._trace_enabled or self.slack is None:
+            return
+        channel = self._slack_reply_channel
+        thread_ts = self._trace_thread_ts or self._slack_reply_thread_ts
+        if not channel or not thread_ts:
+            return
+        safe = self._sanitize_trace_text(message)
+        if not safe:
+            return
+        self.slack.send_message(f"🧭 {safe}", channel=channel, thread_ts=thread_ts)
+
+    def _sanitize_trace_text(self, text: str) -> str:
+        import re
+
+        s = (text or "").strip()
+        if not s:
+            return ""
+
+        for key in ("OPENROUTER_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+            secret = os.environ.get(key)
+            if secret:
+                s = s.replace(secret, "***")
+
+        s = re.sub(r"(?i)\b(api[_-]?key|token|password|passwd|secret)\s*[:=]\s*[^\s]+", r"\1=***", s)
+        if len(s) > 1800:
+            s = s[:1800] + "…"
+        return s
+
     def _slack_send(
         self,
         text: str,
         *,
         channel: str | None = None,
         thread_ts: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Send a message via Slack if the bot is configured."""
         if self.slack is not None:
-            self.slack.send_message(
+            return self.slack.send_message(
                 text,
                 channel=channel or self._slack_reply_channel,
                 thread_ts=thread_ts or self._slack_reply_thread_ts,
             )
-        else:
-            logger.warning("Slack not configured, message not sent: %s", text[:100])
+        logger.warning("Slack not configured, message not sent: %s", text[:100])
+        return None
 
     @staticmethod
     def _format_shell_result(result: ShellResult) -> str:
