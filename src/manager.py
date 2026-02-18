@@ -844,15 +844,13 @@ class Manager:
                 )
                 return
 
-            if self._is_procedure_library_request(stripped):
-                self._slack_send(
-                    "保存済み手順SoT一覧:\n"
-                    f"{self.procedure_store.format_library(limit=12, include_steps=False)}\n\n"
-                    "社内共有手順SoT一覧:\n"
-                    f"{self.procedure_store.format_shared(limit=12)}"
-                )
+            if self._is_agent_list_request(stripped):
+                self._slack_send(self._build_agent_list_reply())
                 return
 
+            if self._is_procedure_library_request(stripped):
+                self._slack_send(self._build_procedure_library_reply())
+                return
             recalled_procedure = self.procedure_store.find_best_for_request(stripped)
             if recalled_procedure is not None:
                 self._slack_send(self.procedure_store.render_reply(recalled_procedure))
@@ -2068,13 +2066,78 @@ class Manager:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _is_procedure_library_request(text: str) -> bool:
-        normalized = (text or "").replace(" ", "").replace("　", "")
+    def _is_agent_list_request(text: str) -> bool:
+        normalized = (text or "").replace(" ", "").replace("　", "").lower()
         if not normalized:
             return False
-        has_library_word = any(k in normalized for k in ("一覧", "リスト", "library", "ライブラリ", "どんな"))
-        has_target_word = any(k in normalized for k in ("手順", "runbook", "procedure", "共有"))
+        has_agent_word = any(
+            k in normalized
+            for k in ("社員ai", "社員", "エージェント", "sub-agent", "subagent", "worker")
+        )
+        has_list_word = any(
+            k in normalized
+            for k in ("一覧", "リスト", "最近", "直近", "動いて", "稼働", "アクティブ", "教えて", "共有")
+        )
+        has_procedure_hint = any(k in normalized for k in ("手順", "runbook", "procedure", "sot"))
+        return has_agent_word and has_list_word and not has_procedure_hint
+
+    def _build_agent_list_reply(self) -> str:
+        try:
+            all_agents = [a for a in self.agent_registry._list_all() if a.agent_id != "ceo"]
+        except Exception:
+            logger.warning("Failed to load agent list", exc_info=True)
+            return "社員AIの一覧取得中にエラーが発生しました。もう一度試してください。"
+
+        if not all_agents:
+            return "現在、社員AIはまだ作成されていません。必要なら役割を指定して作成します。"
+
+        all_agents.sort(key=lambda a: a.updated_at, reverse=True)
+        active_agents = [a for a in all_agents if a.status == "active"]
+
+        lines: list[str] = []
+        if active_agents:
+            lines.append(f"最近動いている社員AIは {len(active_agents)} 名です。")
+            for agent in active_agents[:8]:
+                ts = agent.updated_at.strftime("%Y-%m-%d %H:%M")
+                lines.append(f"- {agent.name}（{agent.role}） model={agent.model} / 更新: {ts} UTC")
+        else:
+            lines.append("現在アクティブな社員AIはいません。")
+            lines.append("直近で動いていた社員AI:")
+            for agent in all_agents[:5]:
+                ts = agent.updated_at.strftime("%Y-%m-%d %H:%M")
+                lines.append(f"- {agent.name}（{agent.role} / {agent.status}） 更新: {ts} UTC")
+
+        lines.append("必要なら、この中から担当を指定して次タスクを振り分けます。")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _is_procedure_library_request(text: str) -> bool:
+        normalized = (text or "").replace(" ", "").replace("　", "").lower()
+        if not normalized:
+            return False
+        has_library_word = any(k in normalized for k in ("一覧", "リスト", "library", "ライブラリ", "どんな", "ある"))
+        has_target_word = any(
+            k in normalized
+            for k in ("手順", "runbook", "procedure", "sot", "共有手順", "手順sot")
+        )
         return has_library_word and has_target_word
+
+    def _build_procedure_library_reply(self) -> str:
+        try:
+            docs = self.procedure_store.list_active()
+        except Exception:
+            logger.warning("Failed to load procedure library", exc_info=True)
+            return "手順ドキュメントの確認中にエラーが発生しました。もう一度試してください。"
+
+        if not docs:
+            return "確認しました。現在、保存済みの手順ドキュメントはありません。必要なら今回の作業手順を保存します。"
+
+        private_count = sum(1 for d in docs if d.visibility == "private")
+        shared_count = sum(1 for d in docs if d.visibility == "shared")
+        return (
+            f"手順ドキュメントは保存済みです（社内用 {private_count} 件 / 共有 {shared_count} 件）。"
+            "必要な作業名を指定してくれれば、該当手順だけ再掲します。"
+        )
 
     def _slack_send(
         self,
