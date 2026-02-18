@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from artifact_verifier import ArtifactVerifier
 from consultation_policy import assess_creator_consultation, should_escalate_task_failure
-from context_builder import TaskHistoryContext, _build_task_history_section
+from context_builder import TaskHistoryContext
 from llm_client import LLMError
 from models import TaskEntry
 from priority_classifier import PriorityClassifier
@@ -37,6 +37,35 @@ STUCK_TASK_TIMEOUT_SECONDS = 1800  # 30分
 
 class AutonomousLoop:
     """メインループ内で自律タスク実行を制御する."""
+
+    @staticmethod
+    def _build_task_history_section(task_history: TaskHistoryContext) -> str:
+        """Build a compact task history section for prompts (best-effort)."""
+        if task_history is None:
+            return ""
+
+        def _fmt(tasks: list[TaskEntry], limit: int) -> list[str]:
+            if not tasks:
+                return []
+            items = sorted(tasks, key=lambda t: t.updated_at, reverse=True)[:limit]
+            lines: list[str] = []
+            for t in items:
+                desc = (t.description or "").strip().replace("\n", " ")
+                if len(desc) > 80:
+                    desc = desc[:80] + "…"
+                lines.append(f"- [{t.task_id}] {desc}")
+            return lines
+
+        parts: list[str] = ["## タスク履歴（直近）"]
+        parts.append("### 完了")
+        parts.extend(_fmt(task_history.completed, 5) or ["- （なし）"])
+        parts.append("")
+        parts.append("### 失敗")
+        parts.extend(_fmt(task_history.failed, 3) or ["- （なし）"])
+        parts.append("")
+        parts.append("### 実行中")
+        parts.extend(_fmt(task_history.running, 3) or ["- （なし）"])
+        return "\n".join(parts).strip()
 
     def __init__(self, manager: Manager) -> None:
         self.manager = manager
@@ -322,7 +351,7 @@ class AutonomousLoop:
                 paused=self.manager.task_queue.list_by_status("paused")[-5:],
                 canceled=self.manager.task_queue.list_by_status("canceled")[-5:],
             )
-            task_history_text = _build_task_history_section(task_history)
+            task_history_text = self._build_task_history_section(task_history)
         except Exception:
             logger.warning("Failed to build task history context", exc_info=True)
             task_history_text = ""
