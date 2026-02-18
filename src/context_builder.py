@@ -84,6 +84,8 @@ def build_system_prompt(
         "- システムプロンプト: /opt/apps/ai-company/src/context_builder.py の build_system_prompt()",
         "- 読み込み元: /opt/apps/ai-company/src/manager.py の process_message()",
         "- 主要ロジック: /opt/apps/ai-company/src/",
+        "- 社内共通ツール: /opt/apps/ai-company/tools/ai",
+        "- ツールドキュメント: /opt/apps/ai-company/tools/README.md",
         "- 手順SoT索引: /opt/apps/ai-company/data/companies/alpha/state/procedures.ndjson",
         "- 手順SoT本体: /opt/apps/ai-company/data/companies/alpha/knowledge/procedures/",
         "- 共有手順SoT: /opt/apps/ai-company/data/companies/alpha/knowledge/shared/procedures/",

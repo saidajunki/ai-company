@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_DIR="$TOOLS_DIR/bin"
+DOCS_DIR="$TOOLS_DIR/docs"
+
+usage() {
+  cat <<USAGE
+ai-company internal tools runner
+
+Usage:
+  $TOOLS_DIR/ai help
+  $TOOLS_DIR/ai list
+  $TOOLS_DIR/ai <tool> [args...]
+  $TOOLS_DIR/ai run <tool> [args...]
+  $TOOLS_DIR/ai new <tool>
+
+Notes:
+  - Tools live in: $BIN_DIR
+  - Tool docs live in: $DOCS_DIR
+USAGE
+}
+
+list_tools() {
+  if [ ! -d "$BIN_DIR" ]; then
+    echo "(no tools dir: $BIN_DIR)"
+    return 0
+  fi
+
+  local found=0
+  while IFS= read -r -d '' f; do
+    local name
+    name="$(basename "$f")"
+    echo "- $name"
+    found=1
+  done < <(find "$BIN_DIR" -maxdepth 1 -type f -perm -111 -print0 | sort -z)
+
+  if [ "$found" -eq 0 ]; then
+    echo "(no executable tools in $BIN_DIR)"
+  fi
+}
+
+require_tool_name() {
+  local name="${1:-}"
+  if [ -z "$name" ]; then
+    echo "error: tool name is required" >&2
+    exit 2
+  fi
+  if ! [[ "$name" =~ ^[a-z][a-z0-9_-]{1,40}$ ]]; then
+    echo "error: invalid tool name: $name" >&2
+    echo "  allowed: ^[a-z][a-z0-9_-]{1,40}$" >&2
+    exit 2
+  fi
+}
+
+new_tool() {
+  local name="${1:-}"
+  require_tool_name "$name"
+
+  mkdir -p "$BIN_DIR" "$DOCS_DIR"
+
+  local tool_path="$BIN_DIR/$name"
+  local doc_path="$DOCS_DIR/$name.md"
+
+  if [ -e "$tool_path" ] || [ -e "$doc_path" ]; then
+    echo "error: tool already exists: $name" >&2
+    exit 2
+  fi
+
+  cat > "$tool_path" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  TOOL_NAME [args...]
+
+Description:
+  (write what this tool does)
+
+Examples:
+  TOOL_NAME --help
+USAGE
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  ""|help|-h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+echo "TODO: implement TOOL_NAME" >&2
+exit 1
+SCRIPT
+
+  # Replace placeholder in-script to keep skeleton simple.
+  perl -pi -e "s/TOOL_NAME/$name/g" "$tool_path"
+  chmod +x "$tool_path"
+
+  cat > "$doc_path" <<DOC
+# $name
+
+## Purpose
+
+(why this exists / what drift or cost it prevents)
+
+## Usage
+
+\`\`\`bash
+/opt/apps/ai-company/tools/ai $name --help
+\`\`\`
+
+## Source of Truth
+
+- Script: \\`/opt/apps/ai-company/tools/bin/$name\\`
+- Docs: \\`/opt/apps/ai-company/tools/docs/$name.md\\`
+DOC
+
+  echo "created: $tool_path"
+  echo "created: $doc_path"
+  echo "next: edit both files, then commit & push"
+}
+
+run_tool() {
+  local name="${1:-}"
+  require_tool_name "$name"
+
+  local tool_path="$BIN_DIR/$name"
+  if [ ! -x "$tool_path" ]; then
+    echo "error: tool not found or not executable: $tool_path" >&2
+    echo "hint: run '$TOOLS_DIR/ai list'" >&2
+    exit 2
+  fi
+
+  shift || true
+  exec "$tool_path" "$@"
+}
+
+main() {
+  local cmd="${1:-}"
+
+  case "$cmd" in
+    ""|help|-h|--help)
+      usage
+      exit 0
+      ;;
+    list)
+      list_tools
+      exit 0
+      ;;
+    new)
+      shift || true
+      new_tool "${1:-}"
+      exit 0
+      ;;
+    run)
+      shift || true
+      run_tool "${1:-}" "${@:2}"
+      ;;
+    *)
+      run_tool "$cmd" "${@:2}"
+      ;;
+  esac
+}
+
+main "$@"

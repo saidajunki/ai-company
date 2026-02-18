@@ -383,6 +383,8 @@ class SubAgentRunner:
             f"- {company_root / 'state' / 'commitments.ndjson'}",
             f"- {company_root / 'protocols' / 'mcp_servers.yaml'}",
             f"- {company_root / 'journal'}",
+            "- /opt/apps/ai-company/tools/ai",
+            "- /opt/apps/ai-company/tools/README.md",
             "必要に応じて<shell>でファイル参照して構いません。",
         ]
 
