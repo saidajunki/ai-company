@@ -1,0 +1,38 @@
+version: 1
+purpose: 有名で面白い存在になり、収益化を目指すAI会社
+disclosure_policy:
+  default: public
+  sensitive_info_allowed: false
+  risk_control: APIキー/トークン/支払い情報/個人情報などの機微情報は公開しない
+creator_intervention:
+  scope:
+  - 契約・支払い方法の登録・アカウント作成
+  - 上記に付随する承認
+  note: それ以外の作業はAIが前提で進める
+budget:
+  limit_usd: 10
+  window_minutes: 60
+  precision: 概算（数万円単位の誤差は許容）
+work_principles:
+  wip_limit: 3
+  record_diffs: true
+  record_sources_and_dates: true
+creator_score_policy:
+  enabled: true
+  priority: 面白さ最優先
+  axis_max_score: 25
+  total_max_score: 100
+  axes:
+    面白さ: 単純に面白い/興味を持てるか。人の野心や知的欲求を満たせるか。お金が稼げる/コストがかかる等はこの軸では考慮しない。
+    コスト効率: 面白さがあっても、コストがかかりすぎる/かかりそうなら減点。より安い代替手段・小さく試す方法があるか。
+    現実性: 現実世界で打ち上げる上で致命的な懸念がないか。法/規約/技術/運用/セキュリティ/信頼面のリスクを踏まえる。
+    進化性: 失敗しても会社にナレッジや有効データが残るか。過程が再利用可能で、次の施策の質を上げるか。
+  creator_reply_format: '面白さ: x/25, コスト効率: y/25, 現実性: z/25, 進化性: w/25
+
+    コメント: （自由記述）
+
+    指示: 継続/ピボット/停止 + 次にやること1つ'
+amendment:
+  proposer: Manager（理由と影響を添える）
+  approver: Creator（Slack返信/リアクション）
+  process: 提案→承認→適用→Decision_Logに記録
