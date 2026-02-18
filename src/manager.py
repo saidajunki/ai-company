@@ -1193,13 +1193,38 @@ class Manager:
                     reply_text = "\n".join([a.content for a in actions if a.action_type == "reply"])
                     reply_urls = {self._normalize_url(u) for u in self._extract_http_urls(reply_text)}
                     invalid = [u for u in reply_urls if u and u not in prefetch_urls]
-                    if invalid and self.llm_client is not None:
+
+                    dead: list[str] = []
+                    for u in list(reply_urls)[:2]:
+                        if not u:
+                            continue
+                        cmd = (
+                            'curl -s -I -L -m 10 -A "Mozilla/5.0" '
+                            + f'"{u}" | head -n 1'
+                        )
+                        try:
+                            head = execute_shell(command=cmd, timeout=15)
+                            m = re.search(r"(\d{3})", head.stdout or "")
+                            code = int(m.group(1)) if m else 0
+                            if code >= 400 or code == 0:
+                                dead.append(u)
+                        except Exception:
+                            dead.append(u)
+
+                    if (invalid or dead) and self.llm_client is not None:
+                        reason_lines = []
+                        if invalid:
+                            reason_lines.append(f"- invalid_url(not in prefetch): {invalid[0]}")
+                        if dead:
+                            reason_lines.append(f"- dead_url(http>=400 or unknown): {dead[0]}")
                         conversation.append({
                             "role": "user",
                             "content": (
-                                "注意: 返信に含まれるURLが事前リサーチ結果に存在しません（URL捏造の疑い）。\n"
-                                f"- invalid_url: {invalid[0]}\n"
-                                "リサーチ結果に含まれるURLだけで回答し直してください。見つからなければ『見つからない』と明言してください。"
+                                "注意: 返信の出典URLに問題があります（捏造/リンク切れの疑い）。\n"
+                                + "\n".join(reason_lines)
+                                + "\n\n"
+                                "リサーチ結果に含まれるURLだけで、かつ到達可能なURLで回答し直してください。\n"
+                                "見つからなければ『見つからない』と明言してください。"
                             ),
                         })
                         llm_result = self.llm_client.chat(conversation)
