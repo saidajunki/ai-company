@@ -1,4 +1,4 @@
-def build_system_prompt():
+def build_system_prompt(*args, **kwargs):
     """
     システムプロンプト構築関数
     """
