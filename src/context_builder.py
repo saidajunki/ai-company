@@ -63,13 +63,12 @@ def build_system_prompt(
 
     wip = wip or []
     recent_decisions = recent_decisions or []
-    recalled_memories = recalled_memories or []
 
     sections: list[str] = [
         "あなたはAI会社の社長AIです。",
         "このVPS上で事業の実行・改善・運用を担う主体として行動してください。",
         "判断時は必ず『会社方針・運用ルール・予算・重要記憶・直近会話』を確認し、矛盾があれば<consult>でCreatorに相談してください。",
-        "Creatorへの相談(<consult>)は「会社の方向性/憲法/予算方針/外部課金・契約/不可逆・高リスク操作」に限る。依存関係のインストール（例: PHP）や軽微な環境整備は自走で継続し、結果を報告する。",
+        "Creatorへの相談(<consult>)は『会社の方向性/憲法/予算方針/外部課金・契約/不可逆・高リスク操作』に限る。依存関係のインストール（例: PHP）や軽微な環境整備は自走で継続し、結果を報告する。",
         "『ご指示ください』『許可ください』などの許可取りはしない。必要なら不足情報の質問か、選択肢提示の相談をする。",
         "予算/方針/ルール以外でも重要だと判断した情報は、記憶ドメインを自分で整備して保存してください。",
         "不要・低重要・古い記憶は忘却/整理（prune・archive）して構いません。",
@@ -79,14 +78,12 @@ def build_system_prompt(
         "- 社員AIの目的関数: 担当領域の実務成果最大化（実装/運用/調査の具体化と実行）。",
         "- 原則として、専門実務は<delegate>で社員AIに任せる。CEOは目的・制約・評価基準を定義する。",
         "- CEOは実装詳細（細かなコマンド列や実装手順）を先回りで固定しすぎない。",
-        "- 委任時は最低限「目的 / 期限 / 予算上限 / 守る価値観 / 完了条件」を伝える。",
+        "- 委任時は最低限『目的 / 期限 / 予算上限 / 守る価値観 / 完了条件』を伝える。",
         "",
         "## 実体ファイル",
         "- システムプロンプト: /opt/apps/ai-company/src/context_builder.py の build_system_prompt()",
         "- 読み込み元: /opt/apps/ai-company/src/manager.py の process_message()",
         "- 主要ロジック: /opt/apps/ai-company/src/",
-        "- 会社方針記憶: /opt/apps/ai-company/data/companies/alpha/state/policy_memory.ndjson",
-        "- 汎用重要記憶: /opt/apps/ai-company/data/companies/alpha/state/adaptive_memory.ndjson",
         "- 手順SoT索引: /opt/apps/ai-company/data/companies/alpha/state/procedures.ndjson",
         "- 手順SoT本体: /opt/apps/ai-company/data/companies/alpha/knowledge/procedures/",
         "- 共有手順SoT: /opt/apps/ai-company/data/companies/alpha/knowledge/shared/procedures/",
@@ -94,9 +91,11 @@ def build_system_prompt(
         "- MCPサーバ設定: /opt/apps/ai-company/data/companies/alpha/protocols/mcp_servers.yaml",
         "- 再読込フラグ: /opt/apps/ai-company/data/companies/alpha/state/restart_manager.flag",
         "",
-        "## 恒久方針",
-        "- あなたはこのVPS内の社長であり、このVPSを使ってあらゆる事業を行っていく主体である。",
-        "- あなた自身の挙動コードの変更は、あなたを強化して社長能力を上げるための行為である。",
+        "## 会社憲法",
+        _format_constitution(constitution),
+        "",
+        "## ビジョン・事業方針",
+        _format_vision_text(vision_text),
         "",
         "## 会社方針・重要ルール（長期記憶 / 新しい順）",
         (policy_memory_text or "（なし）"),
@@ -125,7 +124,8 @@ def build_system_prompt(
             fallback=(
                 "- まず社内SoT（手順SoT・会社方針・共有ドキュメント）を確認する。\n"
                 "- VPS固有情報/運用手順は社内SoTを優先し、古い可能性があれば更新する。\n"
-                "- GitHubや外部ツールの一般仕様はWebの一次情報を確認する。\n- 期間指定（例: 2026年2月）がある質問は、その期間の一次情報をWebで確認し、期間外の事実は期間外だと明記しない限り答えない。\n"
+                "- GitHubや外部ツールの一般仕様はWebの一次情報を確認する。\n"
+                "- 期間指定（例: 2026年2月）がある質問は、その期間の一次情報をWebで確認し、期間外の事実は期間外だと明記しない限り答えない。\n"
                 "- 自分の実装設定（最大ターン数/動作仕様/ファイル場所など）を聞かれたら、必ず先にコードや設定ファイルを確認してから答える。\n"
                 "- 実行前に『どのSoTを根拠にしたか』を意識して判断する。"
             ),
@@ -140,36 +140,148 @@ def build_system_prompt(
         "- 完了報告前に必ず検証する。サービス案件は『コマンド確認 + 外形確認（curl/ブラウザ相当）』を両方実施する。",
         "- 委任した社員AIの完了報告は『社員名/モデル/主要結果/検証の証跡(要点)』を含め、Creatorに確認作業を投げない（『ご確認ください』禁止）。",
         "",
-        "## 予算",
+        "## 現在のWIP",
+        "\n".join([f"- {x}" for x in wip]) if wip else "- なし",
+        "",
+        "## 予算状況",
         f"- 消費: ${budget_spent:.2f} / ${budget_limit:.2f}",
         "- 予算方針の変更提案や上限超過リスクがある場合は<consult>で相談すること。",
         "",
-        "## WIP",
-        "\n".join([f"- {x}" for x in wip]) if wip else "- なし",
+        "## イニシアチブ",
+        _format_initiatives(active_initiatives),
         "",
-        "## 直近の意思決定",
-        "\n".join([f"- {d.date}: {d.decision}（理由: {d.why}）" for d in recent_decisions[:8]]) if recent_decisions else "- なし",
+        "## 戦略方針",
+        _format_strategy_direction(strategy_direction),
         "",
-        "## 直近会話（Slack含む / 新しい順）",
+        "## リサーチノート",
+        _format_research_notes(research_notes),
+        "",
+        "## 会話履歴",
         _format_conversation_history(conversation_history),
         "",
-        "## 補助メモ（要約/リコール）",
-        _format_optional_text(rolling_summary, fallback="（要約なし）"),
-        _format_optional_list(recalled_memories, fallback="（リコールなし）"),
+        "## 永続メモリ（要約）",
+        _format_optional_text(rolling_summary, fallback="永続メモリなし"),
         "",
-        "## ビジョン",
-        _format_optional_text(vision_text, fallback="（未設定）"),
+        "## 長期記憶（リコール）",
+        _format_optional_list(recalled_memories, fallback="リコールなし"),
         "",
-        "## キュレート記憶",
-        _format_optional_text(curated_memory_text, fallback="（なし）"),
-        "",
-        "## Daily記憶",
-        _format_optional_text(daily_memory_text, fallback="（なし）"),
-        "",
-        _build_format_section(),
     ]
 
+    if slack_thread_context and slack_thread_context.strip():
+        sections.extend([
+            "## Slackスレッド文脈（補足）",
+            slack_thread_context.strip(),
+            "",
+        ])
+
+    # Optional model catalog section (only when provided)
+    mct = (model_catalog_text or "").strip()
+    if mct:
+        sections.extend([
+            "## 利用可能なモデル",
+            "社員エージェントに委任する際、タスクに適したモデルを選択できます。",
+            "- コーディング・分析: coding/analysisカテゴリのモデル",
+            "- 簡単なタスク・情報収集: fast/cheapカテゴリのモデル",
+            "- 汎用タスク: generalカテゴリのモデル",
+            "",
+            mct,
+            "",
+        ])
+
+    sections.append(_build_format_section())
+
     return "\n".join(sections)
+
+
+def _format_constitution(constitution: ConstitutionModel | None) -> str:
+    if constitution is None:
+        return "憲法未設定"
+
+    purpose = (constitution.purpose or "").strip() or "（目的未設定）"
+    try:
+        budget_limit = float(constitution.budget.limit_usd)
+    except Exception:
+        budget_limit = 0.0
+    try:
+        window_minutes = int(constitution.budget.window_minutes)
+    except Exception:
+        window_minutes = 0
+    try:
+        wip_limit = int(constitution.work_principles.wip_limit)
+    except Exception:
+        wip_limit = 0
+
+    creator_scope = []
+    try:
+        creator_scope = list(constitution.creator_intervention.scope)
+    except Exception:
+        creator_scope = []
+
+    disclosure_default = getattr(constitution.disclosure_policy, "default", "public")
+    risk_control = getattr(constitution.disclosure_policy, "risk_control", "")
+
+    lines = [
+        f"- 目的: {purpose}",
+        f"- 予算上限: ${budget_limit:.2f} / {window_minutes}分ウィンドウ",
+        f"- WIP上限: {wip_limit}",
+        f"- Creator介入: {', '.join(creator_scope) if creator_scope else '（なし）'}",
+        f"- 公開方針: {disclosure_default}",
+    ]
+    if risk_control:
+        lines.append(f"- リスク制御: {risk_control}")
+    return "\n".join(lines)
+
+
+def _format_vision_text(text: str | None) -> str:
+    t = (text or "").strip()
+    return t if t else "ビジョン未設定"
+
+
+def _format_strategy_direction(sd: StrategyDirection | None) -> str:
+    if sd is None:
+        return "戦略方針未設定"
+    summary = (sd.summary or "").strip()
+    return summary if summary else "戦略方針未設定"
+
+
+def _format_initiatives(items: list[InitiativeEntry] | None) -> str:
+    if not items:
+        return "アクティブなイニシアチブなし"
+
+    lines: list[str] = []
+    for ini in items[:12]:
+        status = (getattr(ini, "status", "") or "").strip() or "unknown"
+        title = (getattr(ini, "title", "") or "").strip() or "（無題）"
+        desc = (getattr(ini, "description", "") or "").strip()
+        if desc:
+            lines.append(f"- [{status}] {title}: {desc}")
+        else:
+            lines.append(f"- [{status}] {title}")
+
+    return "\n".join(lines) if lines else "アクティブなイニシアチブなし"
+
+
+def _format_research_notes(notes: list[ResearchNote] | None, *, limit: int = 10) -> str:
+    if not notes:
+        return "リサーチノートなし"
+
+    # Newer first (stable for equal timestamps)
+    sorted_notes = sorted(notes, key=lambda n: n.retrieved_at, reverse=True)[:limit]
+
+    lines: list[str] = []
+    for n in sorted_notes:
+        ts = n.retrieved_at.strftime("%Y-%m-%d %H:%M:%S")
+        url = (n.source_url or "").strip()
+        title = (n.title or "").strip()
+        summary = (n.summary or "").strip() or (n.snippet or "").strip()
+        parts = [f"- {ts} {url}".rstrip()]
+        if title:
+            parts.append(f"  {title}")
+        if summary:
+            parts.append(f"  {summary}")
+        lines.append("\n".join(parts))
+
+    return "\n".join(lines) if lines else "リサーチノートなし"
 
 
 def _format_optional_text(text: str | None, *, fallback: str) -> str:
@@ -195,16 +307,19 @@ def _format_optional_list(items: list[str] | None, *, fallback: str) -> str:
 
 def _format_conversation_history(history: list[ConversationEntry] | None) -> str:
     if not history:
-        return "- なし"
-    recent = sorted(history, key=lambda e: e.timestamp, reverse=True)[:40]
+        return "会話履歴なし"
+
+    recent = sorted(history, key=lambda e: e.timestamp)[:60]
     lines: list[str] = []
     for entry in recent:
         ts = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        role = (entry.role or "").strip() or "unknown"
         content = (entry.content or "").strip().replace("\n", " ")
-        if len(content) > 180:
-            content = content[:180] + "…"
-        lines.append(f"- [{ts}] [{entry.role}] {content}")
-    return "\n".join(lines)
+        if len(content) > 400:
+            content = content[:400] + "…"
+        lines.append(f"- [{role}] {ts}: {content}")
+
+    return "\n".join(lines) if lines else "会話履歴なし"
 
 
 def _build_format_section() -> str:

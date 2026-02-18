@@ -28,6 +28,7 @@ class ModelInfo:
 
 DEFAULT_MODEL_CATEGORIES: dict[str, list[str]] = {
     # Anthropic
+    "anthropic/claude-sonnet-4": ["coding", "analysis"],
     "anthropic/claude-3.5-sonnet": ["coding", "analysis"],
     "anthropic/claude-3.5-haiku": ["fast", "cheap", "general"],
     "anthropic/claude-3.7-sonnet": ["coding", "analysis"],
@@ -184,7 +185,7 @@ def select_model_for_role(role: str, fallback_model: str, *, task_description: s
     Priorities:
     1) roleキーワード → class
     2) roleが曖昧/未マッチなら task_description のヒューリスティクス
-    3) general（env）→ fallback_model
+    3) fallback_model
 
     Env overrides:
     - AI_COMPANY_MODEL_GENERAL (default openai/gpt-4.1-mini)
@@ -208,7 +209,7 @@ def select_model_for_role(role: str, fallback_model: str, *, task_description: s
     if _looks_like_research_task(desc):
         return models["research"]
 
-    return models.get("general") or fallback_model
+    return fallback_model
 
 
 def _match_categories(

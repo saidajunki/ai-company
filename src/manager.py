@@ -199,7 +199,7 @@ class Manager:
         self._slack_reply_thread_ts: str | None = None
         self._trace_thread_ts: str | None = None
         self._trace_enabled = os.environ.get("SLACK_TRACE_ENABLED", "1").strip().lower() not in ("0", "false", "off", "no")
-        self._activity_log_enabled = os.environ.get("SLACK_ACTIVITY_LOG_ENABLED", "1").strip().lower() not in ("0", "false", "off", "no")
+        self._activity_log_enabled = os.environ.get("SLACK_ACTIVITY_LOG_ENABLED", "0").strip().lower() not in ("0", "false", "off", "no")
         self._activity_log_channel = os.environ.get("SLACK_ACTIVITY_LOG_CHANNEL", "C0AFPAYTLP4").strip() or None
         self._slack_default_channel = (
             os.environ.get("SLACK_DEFAULT_CHANNEL_ID", "").strip()
@@ -319,6 +319,14 @@ class Manager:
 
         # Determine what to do first after wakeup
         action, description = determine_recovery_action(self.state)
+
+        if action == "consult_creator" and self.recovery_planner is not None:
+            try:
+                planned = self.recovery_planner.handle_idle()
+                if planned:
+                    description = planned
+            except Exception:
+                logger.warning("recovery_planner.handle_idle() failed", exc_info=True)
 
         return action, description
 
@@ -2418,7 +2426,7 @@ class Manager:
             task_id_map[st.index] = entry.task_id
 
         # Creatorに報告
-        self._slack_send(f"タスクを{len(subtasks)}件に分解しました。完了時に報告します。")
+        self._slack_send(f"📋 {len(subtasks)}件のサブタスクを登録しました。完了時にまとめて報告します。")
 
 
     # ------------------------------------------------------------------
@@ -2734,9 +2742,6 @@ class Manager:
         """Send a message via Slack if the bot is configured."""
         if self.slack is not None:
             target_channel = channel or self._slack_reply_channel or self._slack_default_channel or self._slack_last_channel
-            if not target_channel:
-                logger.warning("Slack channel missing; message not sent: %s", text[:100])
-                return None
             if target_channel and target_channel != self._activity_log_channel:
                 self._activity_log(f"CEO→Creator: {self._summarize_for_activity_log(text, limit=700)}")
             return self.slack.send_message(

@@ -59,10 +59,10 @@ class AutonomousLoop:
 
         parts: list[str] = ["## タスク履歴（直近）"]
         parts.append("### 完了")
-        parts.extend(_fmt(task_history.completed, 5) or ["- （なし）"])
+        parts.extend(_fmt(task_history.completed, 10) or ["- （なし）"])
         parts.append("")
         parts.append("### 失敗")
-        parts.extend(_fmt(task_history.failed, 3) or ["- （なし）"])
+        parts.extend(_fmt(task_history.failed, 5) or ["- （なし）"])
         parts.append("")
         parts.append("### 実行中")
         parts.extend(_fmt(task_history.running, 3) or ["- （なし）"])

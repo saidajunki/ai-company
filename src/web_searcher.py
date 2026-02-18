@@ -5,7 +5,7 @@
 フォールバックとしてのみ残す。
 
 Env:
-- AI_COMPANY_WEB_SEARCH_BACKEND: "searxng" | "ddg_html" (default: searxng)
+- AI_COMPANY_WEB_SEARCH_BACKEND: "searxng" | "ddg_html" (default: ddg_html)
 - AI_COMPANY_SEARXNG_URL: e.g. http://127.0.0.1:8088 (default)
 
 Requirements: 1.1, 1.2, 1.3, 1.4
@@ -48,7 +48,7 @@ class WebSearcher:
         searxng_url: str | None = None,
     ) -> None:
         self.shell_timeout = shell_timeout
-        self.backend = (backend or os.environ.get("AI_COMPANY_WEB_SEARCH_BACKEND") or "searxng").strip().lower()
+        self.backend = (backend or os.environ.get("AI_COMPANY_WEB_SEARCH_BACKEND") or "ddg_html").strip().lower()
         self.searxng_url = (
             searxng_url
             or os.environ.get("AI_COMPANY_SEARXNG_URL")
