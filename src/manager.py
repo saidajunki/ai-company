@@ -695,6 +695,7 @@ class Manager:
 
     _MAX_WIP = 3
     _MAX_ACTION_LOOP = 10
+    _MAX_MEMORY_ACTIONS_PER_TASK = 2
 
     # ------------------------------------------------------------------
     # WIP management (Req 5.1, 5.2, 5.5)
@@ -1317,6 +1318,9 @@ class Manager:
     ) -> None:
         """アクションを順次実行し、必要に応じてLLMに再問い合わせする."""
         iterations = 0
+        memory_action_count = 0
+        memory_payload_seen: set[str] = set()
+        suppress_ack_reply = False
         work_dir = self.base_dir / "companies" / self.company_id
 
         while actions and iterations < self._MAX_ACTION_LOOP:
@@ -1325,6 +1329,10 @@ class Manager:
 
             for action in actions:
                 if action.action_type == "reply":
+                    if suppress_ack_reply and self._looks_like_memory_ack_payload(action.content):
+                        logger.info("Skipping ack-like reply in memory guard path (task_id=%s)", task_id)
+                        suppress_ack_reply = False
+                        continue
                     self._slack_send(action.content)
 
                 elif action.action_type == "control":
@@ -1361,6 +1369,29 @@ class Manager:
                         op = "daily"
                         payload = raw
 
+                    payload_key = f"{op}:{' '.join(payload.split()).lower()[:600]}"
+                    if payload_key in memory_payload_seen:
+                        logger.info("Skipping duplicate memory action in task loop (task_id=%s)", task_id)
+                        conversation.append({"role": "user", "content": "メモリ保存スキップ: 重複内容"})
+                        suppress_ack_reply = True
+                        continue
+
+                    if memory_action_count >= self._MAX_MEMORY_ACTIONS_PER_TASK:
+                        logger.warning(
+                            "Memory action guard activated (task_id=%s, count=%d)",
+                            task_id,
+                            memory_action_count,
+                        )
+                        conversation.append({"role": "user", "content": "メモリ保存スキップ: guard(memory_limit)"})
+                        suppress_ack_reply = True
+                        continue
+
+                    if self._looks_like_memory_ack_payload(payload):
+                        logger.info("Skipping ack-like memory payload (task_id=%s)", task_id)
+                        conversation.append({"role": "user", "content": "メモリ保存スキップ: ack_loop_guard"})
+                        suppress_ack_reply = True
+                        continue
+
                     def _split_title_body(text: str) -> tuple[str | None, str]:
                         s = (text or "").strip()
                         if not s:
@@ -1396,6 +1427,9 @@ class Manager:
                             if self.memory_manager is not None:
                                 self.memory_manager.ingest_all_sources()
                             result_text = "メモリ保存: daily OK"
+
+                        memory_payload_seen.add(payload_key)
+                        memory_action_count += 1
 
                         try:
                             self.policy_memory.ingest_text(
@@ -1450,6 +1484,13 @@ class Manager:
                         output_tokens=llm_result.output_tokens,
                         task_id=task_id,
                     )
+
+                    follow_actions = parse_response(llm_result.content)
+                    if self._is_ack_only_memory_followup(follow_actions):
+                        logger.info("Detected ack-only memory follow-up; stopping recursion (task_id=%s)", task_id)
+                        next_actions = []
+                        break
+
                     conversation.append({"role": "assistant", "content": llm_result.content})
                     try:
                         self.conversation_memory.append(ConversationEntry(
@@ -1464,7 +1505,7 @@ class Manager:
                             exc_info=True,
                         )
 
-                    next_actions = parse_response(llm_result.content)
+                    next_actions = follow_actions
                     break
 
                 elif action.action_type == "commitment":
@@ -2063,3 +2104,42 @@ class Manager:
         if result.stderr:
             parts.append(f"stderr:\n{result.stderr}")
         return "\n".join(parts)
+
+
+    @staticmethod
+    def _looks_like_memory_ack_payload(payload: str) -> bool:
+        """Detect likely memory-ack loop payloads from the model itself."""
+        text = (payload or "").strip().lower()
+        if not text:
+            return False
+        loop_markers = (
+            "curated ok",
+            "daily ok",
+            "pin ok",
+            "メモリ保存指示",
+            "保存指示",
+            "承認しました",
+            "再承認",
+            "継続いたします",
+            "継続します",
+        )
+        return any(marker in text for marker in loop_markers)
+
+
+    def _is_ack_only_memory_followup(self, actions: list[Action]) -> bool:
+        """Return True when follow-up consists only of ack-like memory/reply actions."""
+        if not actions:
+            return False
+        has_memory = False
+        for action in actions:
+            if action.action_type == "memory":
+                has_memory = True
+                if not self._looks_like_memory_ack_payload(action.content):
+                    return False
+                continue
+            if action.action_type == "reply":
+                if not self._looks_like_memory_ack_payload(action.content):
+                    return False
+                continue
+            return False
+        return has_memory
