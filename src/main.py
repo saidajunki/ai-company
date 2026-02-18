@@ -54,6 +54,8 @@ AUTONOMOUS_IDLE_GRACE_SECONDS = int(os.environ.get("AUTONOMOUS_IDLE_GRACE_SECOND
 
 NEWSROOM_TEAM_ENABLED = os.environ.get("NEWSROOM_TEAM_ENABLED", "1").strip().lower() not in ("0", "false", "off", "no")
 NEWSROOM_TICK_INTERVAL = int(os.environ.get("NEWSROOM_TICK_INTERVAL", "3600"))
+ALARM_SCHEDULER_ENABLED = os.environ.get("ALARM_SCHEDULER_ENABLED", "1").strip().lower() not in ("0", "false", "off", "no")
+ALARM_TICK_INTERVAL = int(os.environ.get("ALARM_TICK_INTERVAL", "30"))
 
 _shutdown = False
 
@@ -127,6 +129,7 @@ def main() -> None:
         last_creator_activity_at = time.monotonic()
         autonomous_job_pending = threading.Event()
         newsroom_job_pending = threading.Event()
+        alarm_job_pending = threading.Event()
 
         def enqueue(kind: str, payload: dict, priority: int) -> None:
             job_queue.put((priority, next(job_seq), kind, payload))
@@ -433,6 +436,13 @@ def main() -> None:
                             mgr.newsroom_team.tick()
                         finally:
                             newsroom_job_pending.clear()
+                    elif kind == "alarm_tick":
+                        try:
+                            ran = mgr.alarm_scheduler.tick(mgr)
+                            if ran:
+                                log.info("Alarm tick executed due alarms: %d", ran)
+                        finally:
+                            alarm_job_pending.clear()
                     else:
                         log.warning("Unknown job kind: %s", kind)
                 except Exception:
@@ -489,6 +499,26 @@ def main() -> None:
 
         newsroom = threading.Thread(target=newsroom_ticker, daemon=True, name="newsroom-ticker")
         newsroom.start()
+
+        def alarm_ticker() -> None:
+            if not ALARM_SCHEDULER_ENABLED:
+                log.info("Alarm scheduler disabled (ALARM_SCHEDULER_ENABLED=0)")
+                return
+
+            last_tick = 0.0
+            interval = max(5, ALARM_TICK_INTERVAL)
+            log.info("Alarm scheduler ticker enabled (interval=%ds)", interval)
+            while not _shutdown:
+                now = time.monotonic()
+                if now - last_tick >= interval:
+                    if not alarm_job_pending.is_set():
+                        alarm_job_pending.set()
+                        enqueue("alarm_tick", {}, PRIORITY_AUTONOMY)
+                        last_tick = now
+                time.sleep(1)
+
+        alarm = threading.Thread(target=alarm_ticker, daemon=True, name="alarm-ticker")
+        alarm.start()
     else:
         log.warning("SLACK_BOT_TOKEN or SLACK_APP_TOKEN not set – running without Slack")
     # --- Main loop ---

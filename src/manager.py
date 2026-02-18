@@ -74,6 +74,7 @@ from web_searcher import WebSearcher
 from mcp_client import MCPClient
 from task_queue import TaskQueue
 from vision_loader import DEFAULT_VISION, VisionLoader
+from alarm_scheduler import AlarmScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +266,7 @@ class Manager:
         self.sub_agent_runner = SubAgentRunner(self)
         self.autonomous_loop = None
         self.newsroom_team = None
+        self.alarm_scheduler = AlarmScheduler(base_dir, company_id)
         self.web_searcher = WebSearcher()
         self.mcp_client = MCPClient(base_dir, company_id)
         self.research_note_store = ResearchNoteStore(base_dir, company_id)
@@ -1008,6 +1010,22 @@ class Manager:
                     )
                 return
 
+            handled_control, control_reply = self._handle_runtime_control_command(
+                stripped,
+                actor_id=user_id or "creator",
+                actor_role="ceo",
+                actor_model=self.llm_client.model if self.llm_client else None,
+            )
+            if handled_control:
+                if control_reply:
+                    self._slack_send(control_reply)
+                return
+
+            if self._is_time_question(stripped):
+                self._trace_event("fast-path: 現在時刻照会")
+                self._slack_send(self.alarm_scheduler.now_text())
+                return
+
             asks_web_search_impl = (
                 ("web検索" in normalized.lower() or "検索エンジン" in normalized.lower())
                 and any(k in normalized.lower() for k in ("何", "なに", "使", "仕組", "どのファイル", "どこ", "実装", "設定"))
@@ -1293,6 +1311,7 @@ class Manager:
                 shared_procedure_text=shared_procedure_text,
                 sot_policy_text=sot_policy_text,
                 mcp_servers_text=mcp_servers_text,
+                current_time_text=self.alarm_scheduler.now_text(now),
             )
 
             conversation: list[dict[str, str]] = [
@@ -1643,6 +1662,18 @@ class Manager:
                     for line in action.content.splitlines():
                         cmd = line.strip()
                         if not cmd:
+                            continue
+                        handled_control, control_reply = self._handle_runtime_control_command(
+                            cmd,
+                            actor_id="ceo",
+                            actor_role="ceo",
+                            actor_model=self.llm_client.model if self.llm_client else None,
+                        )
+                        if handled_control:
+                            if control_reply:
+                                self._activity_log(
+                                    f"CEO control結果: {self._summarize_for_activity_log(control_reply, limit=260)}"
+                                )
                             continue
                         try:
                             directive = parse_creator_directive(cmd, thread_context=None)
@@ -2593,6 +2624,36 @@ class Manager:
         has_target = any(k in normalized for k in ("最大会話ターン数", "最大ターン数", "max_task_turns", "maxturn"))
         has_question = any(k in normalized for k in ("何", "いくつ", "教えて", "確認", "設定", "値", "なっていますか", "ですか"))
         return has_target and has_question
+
+    @staticmethod
+    def _is_time_question(text: str) -> bool:
+        normalized = (text or "").replace(" ", "").replace("　", "").lower()
+        if not normalized:
+            return False
+        if any(k in normalized for k in ("time now", "time.now", "現在時刻", "今何時", "いま何時", "いまの時刻", "日時")):
+            return True
+        return any(k in normalized for k in ("何時", "なんじ", "時刻")) and any(
+            q in normalized for q in ("教えて", "確認", "知りたい", "ですか")
+        )
+
+    def _handle_runtime_control_command(
+        self,
+        command: str,
+        *,
+        actor_id: str,
+        actor_role: str,
+        actor_model: str | None = None,
+    ) -> tuple[bool, str]:
+        try:
+            return self.alarm_scheduler.handle_control_command(
+                command,
+                actor_id=actor_id,
+                actor_role=actor_role,
+                actor_model=actor_model,
+            )
+        except Exception as exc:
+            logger.warning("Failed to process runtime control command: %s", command, exc_info=True)
+            return True, f"⚠️ controlコマンド処理中にエラーが発生しました: {exc}"
 
 
 

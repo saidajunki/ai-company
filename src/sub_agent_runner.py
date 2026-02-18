@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -349,6 +349,8 @@ class SubAgentRunner:
         purpose_text = (purpose or "").strip() or "未設定"
         vision = (vision_text or "").strip() or "未設定"
         objective = _resolve_role_objective(role)
+        now_utc = datetime.now(timezone.utc)
+        now_jst = now_utc.astimezone(timezone(timedelta(hours=9)))
 
         lines: list[str] = [
             "あなたはAI会社のサブエージェントです。",
@@ -372,6 +374,11 @@ class SubAgentRunner:
             "同じコマンド列を繰り返し使うと判断したら、/opt/apps/ai-company/tools/ai new <name> で共通ツール化するか、手順SoTとして保存して再利用する。",
             "許可取りはしない。確認が必要なのは「会社方針/予算/外部課金・契約/不可逆・高リスク操作」に関わる場合だけ。",
             "",
+            "## 現在時刻",
+            f"- UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"- JST: {now_jst.strftime('%Y-%m-%d %H:%M:%S')}",
+            "- 現在時刻の再確認が必要なら `<control>time now</control>` を使う。",
+            "",
             "## 会社の目的",
             purpose_text,
             "",
@@ -386,6 +393,7 @@ class SubAgentRunner:
             f"- {company_root / 'state' / 'memory.sqlite3'}",
             f"- {company_root / 'state' / 'commitments.ndjson'}",
             f"- {company_root / 'protocols' / 'mcp_servers.yaml'}",
+            f"- {company_root / 'state' / 'alarms.json'}",
             f"- {company_root / 'protocols' / 'newsroom_sources.yaml'}",
             f"- {company_root / 'state' / 'newsroom_state.json'}",
             f"- {company_root / 'journal'}",
@@ -412,8 +420,16 @@ class SubAgentRunner:
             "<research>Web検索クエリ</research>",
             "<mcp>MCPツール呼び出し（社内共通ツール）</mcp>",
             "<memory>社内メモリに残す内容</memory>",
+            "<control>alarm/time制御コマンド</control>",
             "<reply>報告テキスト</reply>",
             "<done>完了メッセージ</done>",
+            "",
+            "control例:",
+            "- alarm add once 2026-02-19T12:00:00+09:00 | self | 10分後に進捗を再確認する",
+            "- alarm add cron 0 * * * * | role:web-developer;budget=0.5 | サイト死活確認して報告",
+            "- alarm list",
+            "- alarm cancel <alarm_id>",
+            "- time now",
             "",
             "タスクが完了したら必ず<done>タグで結果を報告してください。",
         ])
@@ -609,6 +625,30 @@ class SubAgentRunner:
                         logger.warning("Sub-agent memory action failed: %s", exc, exc_info=True)
                         result_text = f"メモリ保存エラー: {exc}"
 
+                    conversation.append({"role": "user", "content": result_text})
+                    needs_followup = True
+                    break
+                elif action.action_type == "control":
+                    self._log_activity(f"社員AIツール利用: name={agent_name} tool=control")
+                    result_parts: list[str] = []
+                    handled_any = False
+                    for raw_cmd in (action.content or "").splitlines():
+                        cmd = raw_cmd.strip()
+                        if not cmd:
+                            continue
+                        handled, result_text = self.manager._handle_runtime_control_command(
+                            cmd,
+                            actor_id=agent_id,
+                            actor_role=role,
+                            actor_model=llm_client.model if llm_client is not None else None,
+                        )
+                        if handled:
+                            handled_any = True
+                            if result_text:
+                                result_parts.append(result_text)
+                    if not handled_any:
+                        result_parts.append(f"control未対応: {action.content}")
+                    result_text = "\n".join(result_parts).strip()
                     conversation.append({"role": "user", "content": result_text})
                     needs_followup = True
                     break
