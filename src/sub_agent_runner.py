@@ -591,6 +591,18 @@ class SubAgentRunner:
 
             if done_result is not None:
                 self._log_activity(f"社員AI→CEO 完了報告: name={agent_name} role={role} done={self._summarize(done_result, limit=220)}")
+
+                reply_actions = [a for a in actions if a.action_type == "reply"]
+                if reply_actions:
+                    reply_text = (reply_actions[-1].content or "").strip()
+                    done_text = (done_result or "").strip()
+
+                    merged = reply_text or done_text
+                    if reply_text and done_text and done_text not in reply_text:
+                        merged = (reply_text + "\n\n" + done_text).strip()
+
+                    return merged
+
                 return done_result
 
             if not needs_followup:
