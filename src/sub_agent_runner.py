@@ -31,6 +31,30 @@ MAX_CONVERSATION_TURNS = 10
 DEFAULT_WIP_LIMIT = 3
 
 
+
+
+_JP_SURNAMES = ['佐藤','鈴木','高橋','田中','渡辺','伊藤','山本','中村','小林','加藤']
+_JP_GIVEN_NAMES = ['陽菜','結衣','葵','凛','咲良','悠斗','蓮','颯太','陽向','悠真']
+
+
+def generate_japanese_employee_name(seed: str, existing_names: set[str] | None = None) -> str:
+    existing = existing_names or set()
+    suffix = seed.split('-', 1)[-1]
+    try:
+        n = int(suffix, 16)
+    except Exception:
+        n = sum(ord(c) for c in seed)
+
+    base = f"{_JP_SURNAMES[n % len(_JP_SURNAMES)]} {_JP_GIVEN_NAMES[(n // len(_JP_SURNAMES)) % len(_JP_GIVEN_NAMES)]}"
+    if base not in existing:
+        return base
+
+    for i in range(2, 100):
+        cand = f"{base}（{i}）"
+        if cand not in existing:
+            return cand
+
+    return base
 @dataclass(frozen=True)
 class RoleObjective:
     """Role-specific objective function and boundaries."""
@@ -192,11 +216,12 @@ class SubAgentRunner:
         # Generate agent_id
         agent_id = f"sub-{uuid4().hex[:6]}"
 
-        # Normalize display name: avoid "role role" in dashboards when name==role.
-        display_name = (name or "").strip() or role
-        if display_name.strip().lower() == (role or "").strip().lower():
-            # Keep it human-readable while making it unique.
-            display_name = f"{role}#{agent_id.split('-', 1)[-1]}"
+        # Assign a unique Japanese employee name for clear logs.
+        try:
+            existing_names = {a.name for a in self.manager.agent_registry._list_all() if getattr(a, 'name', None)}
+        except Exception:
+            existing_names = set()
+        display_name = generate_japanese_employee_name(agent_id, existing_names)
 
         # Create independent LLMClient for this sub-agent
         sub_client = self._create_llm_client(effective_model)
