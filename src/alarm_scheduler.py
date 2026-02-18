@@ -141,6 +141,7 @@ class AlarmScheduler:
             "⚠️ alarmコマンド形式が不正です。使用例:\n"
             "- `alarm add once 2026-02-19T12:00:00+09:00 | ceo | 状況報告を作成する`\n"
             "- `alarm add cron 0 * * * * | role:web-developer;budget=0.5 | 監視結果を確認して報告する`\n"
+            "- `alarm add once +30m | employee:山田 太郎 | 定例タスクを実施する`\n"
             "- `alarm list`\n"
             "- `alarm cancel <alarm_id>`\n"
             "- `time now`"
@@ -368,6 +369,36 @@ class AlarmScheduler:
         role = ""
         if target.startswith("role:"):
             role = target.split(":", 1)[1].strip()
+        elif target.startswith("employee:"):
+            key = target.split(":", 1)[1].strip()
+            employee = None
+            try:
+                es = getattr(manager, "employee_store", None)
+                if es is not None:
+                    employee = es.get_by_id(key) or es.find_by_name(key)
+            except Exception:
+                employee = None
+            if employee is not None and str(employee.status) == "active":
+                role = (employee.role or "").strip() or "worker"
+                if model is None:
+                    model = (employee.model or "").strip() or None
+                target = f"employee:{employee.name}"
+                result = manager.sub_agent_runner.spawn(
+                    name=employee.name,
+                    role=role,
+                    task_description=prompt,
+                    budget_limit_usd=max(0.05, min(float(employee.budget_limit_usd), budget)),
+                    model=model,
+                    ignore_wip_limit=True,
+                    persistent_employee=employee.model_dump(),
+                )
+                if callable(activity):
+                    activity(
+                        f"アラーム完了: alarm_id={alarm_id} employee={employee.name}({employee.employee_id}) "
+                        f"role={role} result={_short(str(result), 180)}"
+                    )
+                return
+            role = "worker"
         elif target.startswith("agent:"):
             agent_id = target.split(":", 1)[1].strip()
             agent = manager.agent_registry.get(agent_id)
@@ -517,6 +548,8 @@ def _normalize_target(target: str, *, actor_role: str) -> str:
         return "ceo"
     if low.startswith("role:"):
         return f"role:{s.split(':', 1)[1].strip() or 'worker'}"
+    if low.startswith("employee:"):
+        return f"employee:{s.split(':', 1)[1].strip()}"
     if low.startswith("agent:"):
         return f"agent:{s.split(':', 1)[1].strip()}"
 

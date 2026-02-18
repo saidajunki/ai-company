@@ -75,6 +75,7 @@ from mcp_client import MCPClient
 from task_queue import TaskQueue
 from vision_loader import DEFAULT_VISION, VisionLoader
 from alarm_scheduler import AlarmScheduler
+from employee_store import EmployeeStore
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +268,7 @@ class Manager:
         self.autonomous_loop = None
         self.newsroom_team = None
         self.alarm_scheduler = AlarmScheduler(base_dir, company_id)
+        self.employee_store = EmployeeStore(base_dir, company_id)
         self.web_searcher = WebSearcher()
         self.mcp_client = MCPClient(base_dir, company_id)
         self.research_note_store = ResearchNoteStore(base_dir, company_id)
@@ -1282,6 +1284,13 @@ class Manager:
                 logger.warning("Failed to load MCP servers for prompt", exc_info=True)
                 mcp_servers_text = None
 
+            employee_roster_text = None
+            try:
+                employee_roster_text = self.employee_store.format_roster(limit=24)
+            except Exception:
+                logger.warning("Failed to load employee roster for prompt", exc_info=True)
+                employee_roster_text = None
+
             system_prompt = build_system_prompt(
                 constitution=self.state.constitution,
                 wip=self.state.wip,
@@ -1312,6 +1321,7 @@ class Manager:
                 sot_policy_text=sot_policy_text,
                 mcp_servers_text=mcp_servers_text,
                 current_time_text=self.alarm_scheduler.now_text(now),
+                employee_roster_text=employee_roster_text,
             )
 
             conversation: list[dict[str, str]] = [
@@ -2333,7 +2343,10 @@ class Manager:
                     content = action.content.strip()
                     role_part, _, desc = content.partition(":")
                     desc = desc.strip() or content
-                    role = self._normalize_delegate_role(role_part, desc)
+                    assignment = self._resolve_delegate_assignment(role_part, desc)
+                    role = assignment["role"]
+                    assignment_kind = assignment["kind"]
+                    employee = assignment.get("employee")
 
                     now = datetime.now(timezone.utc)
                     spent = compute_window_cost(self.state.ledger_events, now)
@@ -2352,6 +2365,7 @@ class Manager:
                     delegation_brief = "\n".join([
                         "【CEO委任ブリーフ】",
                         "- 分業原則: CEOは目的/制約を定義し、実装のHowは社員AIが決める。",
+                        f"- 委任先: {assignment_kind}",
                         f"- role: {role}",
                         f"- task_id: {task_id}",
                         f"- 予算残: ${budget_remaining:.2f} (limit=${budget_limit:.2f})",
@@ -2364,32 +2378,61 @@ class Manager:
                         "【依頼本文】",
                         desc,
                     ])
-                    model_hint = action.model or "auto"
-                    self._trace_event(f"社員AIへ委任: role={role} model={model_hint}")
-                    self._trace_event("社員AIへの指示:\n```\n" + self._sanitize_trace_text(delegation_brief[:1600]) + "\n```")
-                    self._activity_log(
-                        f"CEO→社員AI 委任: role={role} model={model_hint} "
-                        f"task={self._summarize_for_activity_log(desc, limit=240)}"
+                    model_hint = action.model or (employee.model if employee is not None else "auto")
+                    self._trace_event(
+                        f"社員AIへ委任: role={role} kind={assignment_kind} model={model_hint}"
                     )
+                    self._trace_event("社員AIへの指示:\n```\n" + self._sanitize_trace_text(delegation_brief[:1600]) + "\n```")
+                    if employee is not None:
+                        self._activity_log(
+                            f"CEO→社員AI 委任: employee={employee.name}({employee.employee_id}) "
+                            f"role={role} model={model_hint} "
+                            f"task={self._summarize_for_activity_log(desc, limit=240)}"
+                        )
+                    else:
+                        self._activity_log(
+                            f"CEO→アルバイト 委任: role={role} model={model_hint} "
+                            f"task={self._summarize_for_activity_log(desc, limit=240)}"
+                        )
 
                     try:
+                        target_name = employee.name if employee is not None else role
+                        target_budget = (
+                            float(employee.budget_limit_usd)
+                            if employee is not None
+                            else min(1.0, max(0.2, budget_remaining))
+                        )
                         result = self.sub_agent_runner.spawn(
-                            name=role,
+                            name=target_name,
                             role=role,
                             task_description=delegation_brief,
+                            budget_limit_usd=target_budget,
                             model=action.model,
+                            persistent_employee=employee.model_dump() if employee is not None else None,
                         )
                         result_text = f"サブエージェント結果 (role={role}):\n{result}"
-                        self._activity_log(
-                            f"社員AI→CEO 報告: role={role} "
-                            f"result={self._summarize_for_activity_log(result, limit=320)}"
-                        )
+                        if employee is not None:
+                            self._activity_log(
+                                f"社員AI→CEO 報告: employee={employee.name}({employee.employee_id}) role={role} "
+                                f"result={self._summarize_for_activity_log(result, limit=320)}"
+                            )
+                        else:
+                            self._activity_log(
+                                f"アルバイト→CEO 報告: role={role} "
+                                f"result={self._summarize_for_activity_log(result, limit=320)}"
+                            )
                     except Exception as exc:
                         logger.warning("Sub-agent spawn failed: %s", exc, exc_info=True)
                         result_text = f"サブエージェントエラー (role={role}): {exc}"
-                        self._activity_log(
-                            f"社員AIエラー: role={role} error={self._summarize_for_activity_log(str(exc), limit=220)}"
-                        )
+                        if employee is not None:
+                            self._activity_log(
+                                f"社員AIエラー: employee={employee.name}({employee.employee_id}) role={role} "
+                                f"error={self._summarize_for_activity_log(str(exc), limit=220)}"
+                            )
+                        else:
+                            self._activity_log(
+                                f"アルバイトエラー: role={role} error={self._summarize_for_activity_log(str(exc), limit=220)}"
+                            )
 
                     conversation.append({"role": "user", "content": result_text})
 
@@ -2518,6 +2561,59 @@ class Manager:
 
         return "worker"
 
+    def _resolve_delegate_assignment(self, role_part: str, desc: str) -> dict:
+        token = (role_part or "").strip()
+        lower = token.lower()
+
+        def _fallback_role(raw_role: str) -> str:
+            return self._normalize_delegate_role(raw_role, desc)
+
+        if lower.startswith(("part-time@", "parttime@", "アルバイト@", "baito@")):
+            raw = token.split("@", 1)[1].strip() if "@" in token else ""
+            return {
+                "kind": "part-time",
+                "employee": None,
+                "role": _fallback_role(raw),
+            }
+
+        if lower.startswith(("employee@", "社員@")):
+            target = token.split("@", 1)[1].strip() if "@" in token else ""
+            employee = self.employee_store.resolve_active(target)
+            if employee is not None:
+                return {
+                    "kind": "employee",
+                    "employee": employee,
+                    "role": employee.role,
+                }
+            return {
+                "kind": "part-time",
+                "employee": None,
+                "role": _fallback_role(target),
+            }
+
+        by_key = self.employee_store.resolve_active(token)
+        if by_key is not None:
+            return {
+                "kind": "employee",
+                "employee": by_key,
+                "role": by_key.role,
+            }
+
+        role = _fallback_role(token) if token else _fallback_role("worker")
+        by_role = self.employee_store.find_active_by_role(role)
+        if by_role is not None:
+            return {
+                "kind": "employee",
+                "employee": by_role,
+                "role": by_role.role,
+            }
+
+        return {
+            "kind": "part-time",
+            "employee": None,
+            "role": role,
+        }
+
     @staticmethod
     def _is_agent_list_request(text: str) -> bool:
         normalized = (text or "").replace(" ", "").replace("　", "").lower()
@@ -2548,21 +2644,16 @@ class Manager:
 
     def _build_agent_list_reply(self, request_text: str = "") -> str:
         try:
-            all_agents = [a for a in self.agent_registry._list_all() if a.agent_id != "ceo"]
+            all_runtime_agents = [a for a in self.agent_registry._list_all() if a.agent_id != "ceo"]
+            employees = self.employee_store.list_all()
         except Exception:
             logger.warning("Failed to load agent list", exc_info=True)
             return "社員AIの一覧取得中にエラーが発生しました。もう一度試してください。"
 
-        if not all_agents:
-            return "現在、社員AIはまだ作成されていません。"
-
         normalized = (request_text or "").replace(" ", "").replace("　", "").lower()
         asks_recent = any(k in normalized for k in ("最近", "直近", "動いて", "稼働", "アクティブ", "現在"))
 
-        all_agents.sort(key=lambda a: a.updated_at, reverse=True)
-        active_agents = [a for a in all_agents if a.status == "active"]
-
-        def _fmt_agent_line(agent) -> str:
+        def _fmt_runtime(agent) -> str:
             ts = agent.updated_at.strftime("%Y-%m-%d %H:%M")
             model = (agent.model or "unknown").strip() or "unknown"
             return (
@@ -2571,20 +2662,41 @@ class Manager:
             )
 
         lines: list[str] = []
-        if active_agents:
-            lines.append(f"現在稼働中の社員AIは {len(active_agents)} 名です。")
-            for agent in active_agents[:8]:
-                lines.append(_fmt_agent_line(agent))
-            if not asks_recent and len(all_agents) > len(active_agents):
-                lines.append("直近で停止した社員AI:")
-                for agent in [a for a in all_agents if a.status != "active"][:3]:
-                    lines.append(_fmt_agent_line(agent))
-        else:
-            lines.append("現在アクティブな社員AIはいません。")
-            lines.append("直近で動いていた社員AI（モデル付き）:")
-            for agent in all_agents[:5]:
-                lines.append(_fmt_agent_line(agent))
 
+        if employees:
+            active_employees = [e for e in employees if e.status == "active"]
+            inactive_employees = [e for e in employees if e.status != "active"]
+            lines.append(f"正社員AIは {len(active_employees)} 名（登録合計 {len(employees)} 名）です。")
+            for e in sorted(active_employees, key=lambda x: x.updated_at, reverse=True)[:12]:
+                ts = e.updated_at.strftime("%Y-%m-%d %H:%M")
+                lines.append(
+                    f"- {e.name}（id={e.employee_id} / role={e.role} / model={e.model} / "
+                    f"purpose={self._summarize_for_activity_log(e.purpose, limit=50)} / updated={ts} UTC）"
+                )
+            if inactive_employees and not asks_recent:
+                lines.append("現在停止中の正社員AI:")
+                for e in sorted(inactive_employees, key=lambda x: x.updated_at, reverse=True)[:5]:
+                    ts = e.updated_at.strftime("%Y-%m-%d %H:%M")
+                    lines.append(f"- {e.name}（id={e.employee_id} / role={e.role} / model={e.model} / updated={ts} UTC）")
+        else:
+            lines.append("正社員AIはまだ登録されていません。")
+
+        runtime_part_time = [a for a in all_runtime_agents if not str(a.agent_id).startswith("emp-")]
+        runtime_part_time.sort(key=lambda a: a.updated_at, reverse=True)
+        active_part_time = [a for a in runtime_part_time if a.status == "active"]
+
+        if active_part_time:
+            lines.append(f"現在稼働中のアルバイトAIは {len(active_part_time)} 名です。")
+            for agent in active_part_time[:8]:
+                lines.append(_fmt_runtime(agent))
+        elif runtime_part_time:
+            lines.append("現在アクティブなアルバイトAIはいません。")
+            lines.append("直近で動いていたアルバイトAI:")
+            for agent in runtime_part_time[:5]:
+                lines.append(_fmt_runtime(agent))
+
+        if len(lines) == 0:
+            return "現在、社員AIはまだ作成されていません。"
         return "\n".join(lines)
 
     @staticmethod
@@ -2645,6 +2757,13 @@ class Manager:
         actor_model: str | None = None,
     ) -> tuple[bool, str]:
         try:
+            handled_employee, employee_reply = self._handle_employee_control_command(
+                command,
+                actor_id=actor_id,
+                actor_model=actor_model,
+            )
+            if handled_employee:
+                return True, employee_reply
             return self.alarm_scheduler.handle_control_command(
                 command,
                 actor_id=actor_id,
@@ -2654,6 +2773,101 @@ class Manager:
         except Exception as exc:
             logger.warning("Failed to process runtime control command: %s", command, exc_info=True)
             return True, f"⚠️ controlコマンド処理中にエラーが発生しました: {exc}"
+
+    def _handle_employee_control_command(
+        self,
+        command: str,
+        *,
+        actor_id: str,
+        actor_model: str | None,
+    ) -> tuple[bool, str]:
+        cmd = (command or "").strip()
+        if not cmd:
+            return False, ""
+
+        m = re.match(r"^employee\s+list(?:\s+(\d+))?\s*$", cmd, re.IGNORECASE)
+        if m:
+            limit = int(m.group(1) or 20)
+            rows = self.employee_store.list_all()
+            if not rows:
+                return True, "正社員AIはまだ登録されていません。"
+            rows.sort(key=lambda x: x.updated_at, reverse=True)
+            lines = [f"正社員AI一覧（{len(rows)}名, 表示上限{limit}）"]
+            for e in rows[: max(1, limit)]:
+                ts = e.updated_at.strftime("%Y-%m-%d %H:%M")
+                lines.append(
+                    f"- {e.name}（id={e.employee_id} / role={e.role} / status={e.status} / model={e.model} / updated={ts} UTC）"
+                )
+            return True, "\n".join(lines)
+
+        m = re.match(r"^employee\s+create\s+(.+?)\s*\|\s*(.+?)\s*\|\s*(.+?)(?:\s*\|\s*(.+))?$", cmd, re.IGNORECASE)
+        if m:
+            name = m.group(1).strip()
+            role = m.group(2).strip()
+            purpose = m.group(3).strip()
+            opts = (m.group(4) or "").strip()
+
+            model = (actor_model or "").strip() or "openai/gpt-4.1-mini"
+            budget = 1.0
+            for opt in [x.strip() for x in opts.split(";") if x.strip()]:
+                if "=" not in opt:
+                    continue
+                key, val = opt.split("=", 1)
+                key = key.strip().lower()
+                val = val.strip()
+                if key == "model" and val:
+                    model = val
+                elif key in ("budget", "budget_usd"):
+                    try:
+                        budget = max(0.05, float(val))
+                    except Exception:
+                        pass
+
+            entry, created = self.employee_store.ensure_active(
+                name=name,
+                role=role,
+                purpose=purpose,
+                model=model,
+                budget_limit_usd=budget,
+            )
+            if created:
+                return True, (
+                    "✅ 正社員AIを登録しました。\n"
+                    f"- name: {entry.name}\n"
+                    f"- id: {entry.employee_id}\n"
+                    f"- role: {entry.role}\n"
+                    f"- model: {entry.model}\n"
+                    f"- budget_limit: ${entry.budget_limit_usd:.2f}\n"
+                    f"- memory: {self.employee_store.memory_path(entry.employee_id)}"
+                )
+            return True, (
+                f"ℹ️ 既存の正社員AIを再利用します: {entry.name}（id={entry.employee_id} / role={entry.role} / model={entry.model}）"
+            )
+
+        m = re.match(r"^employee\s+(activate|deactivate)\s+(.+)$", cmd, re.IGNORECASE)
+        if m:
+            mode = m.group(1).lower()
+            key = m.group(2).strip()
+            entry = self.employee_store.resolve_active(key) if mode == "deactivate" else self.employee_store.resolve_active(key)
+            if entry is None:
+                entry = self.employee_store.get_by_id(key) or self.employee_store.find_by_name(key)
+            if entry is None:
+                return True, f"⚠️ 指定の正社員AIが見つかりません: {key}"
+            updated = self.employee_store.update_status(entry.employee_id, "active" if mode == "activate" else "inactive")
+            return True, f"✅ 正社員AIの状態を更新しました: {updated.name}（id={updated.employee_id} / status={updated.status}）"
+
+        m = re.match(r"^employee\s+memory\s+(.+)$", cmd, re.IGNORECASE)
+        if m:
+            key = m.group(1).strip()
+            entry = self.employee_store.get_by_id(key) or self.employee_store.find_by_name(key)
+            if entry is None:
+                return True, f"⚠️ 指定の正社員AIが見つかりません: {key}"
+            text = self.employee_store.read_memory(entry.employee_id, max_chars=2500).strip()
+            if not text:
+                return True, f"{entry.name} のメモリはまだ空です。"
+            return True, f"{entry.name} のメモリ抜粋:\n{text}"
+
+        return False, ""
 
 
 

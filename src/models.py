@@ -257,6 +257,22 @@ class AgentEntry(BaseModel):
     updated_at: datetime
 
 
+# --- Persistent Employee Registry ---
+
+class EmployeeEntry(BaseModel):
+    """永続社員AIのプロファイル."""
+
+    employee_id: str
+    name: str
+    role: str
+    purpose: str
+    model: str
+    budget_limit_usd: float = Field(ge=0)
+    status: Literal["active", "inactive"] = "active"
+    created_at: datetime
+    updated_at: datetime
+
+
 # --- Service Registry (Req 5.1) ---
 
 class ServiceEntry(BaseModel):

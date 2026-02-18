@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from alarm_scheduler import AlarmScheduler
+from employee_store import EmployeeStore
 
 
 class _DummySubAgentRunner:
@@ -19,6 +20,7 @@ class _DummySubAgentRunner:
         budget_limit_usd: float,
         model: str | None = None,
         ignore_wip_limit: bool = False,
+        persistent_employee: dict | None = None,
     ) -> str:
         self.calls.append(
             {
@@ -28,6 +30,7 @@ class _DummySubAgentRunner:
                 "budget_limit_usd": budget_limit_usd,
                 "model": model,
                 "ignore_wip_limit": ignore_wip_limit,
+                "persistent_employee": persistent_employee,
             }
         )
         return "ok"
@@ -44,6 +47,7 @@ class _DummyManager:
         self.activity_logs: list[str] = []
         self.sub_agent_runner = _DummySubAgentRunner()
         self.agent_registry = _DummyAgentRegistry()
+        self.employee_store = None
         self._slack_default_channel = None
         self._slack_last_channel = None
 
@@ -162,3 +166,38 @@ def test_alarm_tick_executes_due_entries(tmp_path: Path) -> None:
     assert len(manager.sub_agent_runner.calls) == 1
     assert manager.sub_agent_runner.calls[0]["role"] == "web-developer"
     assert manager.sub_agent_runner.calls[0]["ignore_wip_limit"] is True
+
+
+def test_alarm_tick_targets_persistent_employee(tmp_path: Path) -> None:
+    scheduler = _new_scheduler(tmp_path)
+    employee_store = EmployeeStore(tmp_path, "alpha")
+    employee = employee_store.create(
+        name="山田 太郎",
+        role="web-developer",
+        purpose="継続開発担当",
+        model="openai/gpt-4.1",
+        budget_limit_usd=0.9,
+    )
+    entry = scheduler.add_once(
+        run_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        prompt="継続タスクを実行",
+        owner_agent="ceo",
+        target=f"employee:{employee.name}",
+        budget_limit_usd=1.0,
+    )
+
+    state = scheduler._load_state()
+    for alarm in state["alarms"]:
+        if alarm["alarm_id"] == entry["alarm_id"]:
+            alarm["next_run_at"] = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+    scheduler._save_state(state)
+
+    manager = _DummyManager()
+    manager.employee_store = employee_store
+    executed = scheduler.tick(manager)
+    assert executed == 1
+    assert len(manager.sub_agent_runner.calls) == 1
+    call = manager.sub_agent_runner.calls[0]
+    assert call["name"] == employee.name
+    assert call["role"] == employee.role
+    assert call["persistent_employee"] is not None

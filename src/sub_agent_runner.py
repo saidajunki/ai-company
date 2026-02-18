@@ -183,6 +183,7 @@ class SubAgentRunner:
         budget_limit_usd: float = 1.0,
         model: str | None = None,
         ignore_wip_limit: bool = False,
+        persistent_employee: dict | None = None,
     ) -> str:
         """サブエージェントをスポーンし、タスクを実行する.
 
@@ -193,6 +194,7 @@ class SubAgentRunner:
             budget_limit_usd: 予算上限（USD）
             model: 使用するLLMモデル名。未指定/空文字列の場合はCEO_AIのモデルにフォールバック。
             ignore_wip_limit: True の場合、WIP制限を無視してスポーンする。
+            persistent_employee: 正社員AIプロファイル（employee_id/name/role/model/purpose）。
 
         Returns:
             結果文字列（完了メッセージまたはエラー）
@@ -211,20 +213,34 @@ class SubAgentRunner:
         # 2. Role-based auto-selection from model_catalog
         # 3. Fallback to CEO model
         ceo_model = self.manager.llm_client.model if self.manager.llm_client else "unknown"
+        employee_profile = persistent_employee or {}
+        is_persistent_employee = bool(employee_profile)
+
+        if is_persistent_employee:
+            agent_id = str(employee_profile.get("employee_id") or f"emp-{uuid4().hex[:6]}")
+            display_name = str(employee_profile.get("name") or name).strip() or name
+            role = str(employee_profile.get("role") or role).strip() or role
+            if not model:
+                model = str(employee_profile.get("model") or "").strip() or None
+            try:
+                if budget_limit_usd <= 0:
+                    budget_limit_usd = float(employee_profile.get("budget_limit_usd") or 1.0)
+            except Exception:
+                budget_limit_usd = max(0.05, budget_limit_usd)
+        else:
+            # Generate agent_id
+            agent_id = f"sub-{uuid4().hex[:6]}"
+            # Assign a unique Japanese employee name for clear logs.
+            try:
+                existing_names = {a.name for a in self.manager.agent_registry._list_all() if getattr(a, 'name', None)}
+            except Exception:
+                existing_names = set()
+            display_name = generate_japanese_employee_name(agent_id, existing_names)
+
         if model:
             effective_model = model
         else:
             effective_model = select_model_for_role(role, fallback_model=ceo_model, task_description=task_description)
-
-        # Generate agent_id
-        agent_id = f"sub-{uuid4().hex[:6]}"
-
-        # Assign a unique Japanese employee name for clear logs.
-        try:
-            existing_names = {a.name for a in self.manager.agent_registry._list_all() if getattr(a, 'name', None)}
-        except Exception:
-            existing_names = set()
-        display_name = generate_japanese_employee_name(agent_id, existing_names)
 
         # Create independent LLMClient for this sub-agent
         sub_client = self._create_llm_client(effective_model)
@@ -258,6 +274,8 @@ class SubAgentRunner:
 
         rolling_summary_text = None
         recalled_memories = None
+        employee_memory_text = None
+        employee_purpose = None
         try:
             mm = getattr(self.manager, "memory_manager", None)
             if mm is not None:
@@ -267,6 +285,14 @@ class SubAgentRunner:
         except Exception:
             logger.warning("Failed to build memory context for sub-agent", exc_info=True)
 
+        if is_persistent_employee:
+            try:
+                employee_id = str(employee_profile.get("employee_id") or agent_id)
+                employee_memory_text = self.manager.employee_store.read_memory(employee_id, max_chars=3200)
+                employee_purpose = str(employee_profile.get("purpose") or "").strip() or None
+            except Exception:
+                logger.warning("Failed to load employee-specific memory", exc_info=True)
+
         system_prompt = self._build_sub_agent_prompt(
             role,
             task_description,
@@ -274,6 +300,11 @@ class SubAgentRunner:
             vision_text=vision_text,
             rolling_summary_text=rolling_summary_text,
             recalled_memories=recalled_memories,
+            employee_name=display_name if is_persistent_employee else None,
+            employee_id=str(employee_profile.get("employee_id") or agent_id) if is_persistent_employee else None,
+            employee_purpose=employee_purpose,
+            employee_memory_text=employee_memory_text,
+            employment_type="employee" if is_persistent_employee else "part-time",
         )
         try:
             result = self._run_conversation(
@@ -315,6 +346,21 @@ class SubAgentRunner:
         except Exception:
             logger.warning("Failed to persist sub-agent outcome", exc_info=True)
 
+        if is_persistent_employee:
+            try:
+                employee_id = str(employee_profile.get("employee_id") or agent_id)
+                self.manager.employee_store.append_memory(
+                    employee_id,
+                    title="委任タスク実行",
+                    content=(
+                        f"task:\n{task_description.strip()}\n\n"
+                        f"result:\n{(result or '').strip()}"
+                    ),
+                    source="delegation",
+                )
+            except Exception:
+                logger.warning("Failed to append employee memory", exc_info=True)
+
         return result
 
     def _create_llm_client(self, model: str) -> LLMClient | None:
@@ -343,6 +389,11 @@ class SubAgentRunner:
         vision_text: str | None = None,
         rolling_summary_text: str | None = None,
         recalled_memories: list[str] | None = None,
+        employee_name: str | None = None,
+        employee_id: str | None = None,
+        employee_purpose: str | None = None,
+        employee_memory_text: str | None = None,
+        employment_type: str = "part-time",
     ) -> str:
         """サブエージェント用のシステムプロンプトを構築する."""
         company_root = self.manager.base_dir / "companies" / self.manager.company_id
@@ -355,6 +406,7 @@ class SubAgentRunner:
         lines: list[str] = [
             "あなたはAI会社のサブエージェントです。",
             f"役割: {role}",
+            f"雇用区分: {'正社員AI' if employment_type == 'employee' else 'アルバイトAI'}",
             f"タスク: {task_description}",
             "",
             "## この役割の目的関数",
@@ -373,6 +425,11 @@ class SubAgentRunner:
             "軽微な環境整備（依存関係のインストール/設定修正/再起動など）は独断で続行してよい（例: wp が PHP 不足で動かないなら PHP をインストールして再検証する）。",
             "同じコマンド列を繰り返し使うと判断したら、/opt/apps/ai-company/tools/ai new <name> で共通ツール化するか、手順SoTとして保存して再利用する。",
             "許可取りはしない。確認が必要なのは「会社方針/予算/外部課金・契約/不可逆・高リスク操作」に関わる場合だけ。",
+            "",
+            "## 組織ルール",
+            "- 正社員AIは継続担当として一貫性を維持する。重要な進捗・判断は自分のメモリに残す。",
+            "- アルバイトAIは短期スポット担当。必要最小限の実装/調査を迅速に完了する。",
+            "- 雇用区分を勝手に変更しない。",
             "",
             "## 現在時刻",
             f"- UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -401,6 +458,21 @@ class SubAgentRunner:
             "- /opt/apps/ai-company/tools/README.md",
             "必要に応じて<shell>でファイル参照して構いません。",
         ]
+
+        if employment_type == "employee":
+            lines.extend([
+                "",
+                "## あなたの社員プロファイル",
+                f"- name: {employee_name or '(unknown)'}",
+                f"- employee_id: {employee_id or '(unknown)'}",
+                f"- purpose: {employee_purpose or '(未設定)'}",
+            ])
+            if employee_memory_text and employee_memory_text.strip():
+                lines.extend([
+                    "",
+                    "## あなた専用の記憶（抜粋）",
+                    employee_memory_text.strip(),
+                ])
 
         if rolling_summary_text and rolling_summary_text.strip():
             lines.extend(["", rolling_summary_text.strip()])
