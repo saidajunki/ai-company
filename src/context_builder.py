@@ -53,6 +53,9 @@ def build_system_prompt(
     policy_conflicts_text: str | None = None,
     adaptive_memory_text: str | None = None,
     adaptive_domains_text: str | None = None,
+    procedure_library_text: str | None = None,
+    shared_procedure_text: str | None = None,
+    sot_policy_text: str | None = None,
     **_unused,
 ) -> str:
     """Build system prompt with short-term + long-term memory context."""
@@ -74,6 +77,9 @@ def build_system_prompt(
         "- 主要ロジック: /opt/apps/ai-company/src/",
         "- 会社方針記憶: /opt/apps/ai-company/data/companies/alpha/state/policy_memory.ndjson",
         "- 汎用重要記憶: /opt/apps/ai-company/data/companies/alpha/state/adaptive_memory.ndjson",
+        "- 手順SoT索引: /opt/apps/ai-company/data/companies/alpha/state/procedures.ndjson",
+        "- 手順SoT本体: /opt/apps/ai-company/data/companies/alpha/knowledge/procedures/",
+        "- 共有手順SoT: /opt/apps/ai-company/data/companies/alpha/knowledge/shared/procedures/",
         "- 記憶ドメイン: /opt/apps/ai-company/data/companies/alpha/knowledge/domains/",
         "- 再読込フラグ: /opt/apps/ai-company/data/companies/alpha/state/restart_manager.flag",
         "",
@@ -95,6 +101,23 @@ def build_system_prompt(
         "",
         "## 記憶ドメイン構造",
         (adaptive_domains_text or "（なし）"),
+        "",
+        "## 手順SoTライブラリ（丸ごと保存 / 新しい順）",
+        (procedure_library_text or "（なし）"),
+        "",
+        "## 社内共有手順SoT（社員AI共通）",
+        (shared_procedure_text or "（なし）"),
+        "",
+        "## SoT判断ルール",
+        _format_optional_text(
+            sot_policy_text,
+            fallback=(
+                "- まず社内SoT（手順SoT・会社方針・共有ドキュメント）を確認する。\n"
+                "- VPS固有情報/運用手順は社内SoTを優先し、古い可能性があれば更新する。\n"
+                "- GitHubや外部ツールの一般仕様はWebの一次情報を確認する。\n"
+                "- 実行前に『どのSoTを根拠にしたか』を意識して判断する。"
+            ),
+        ),
         "",
         "## 予算",
         f"- 消費: ${budget_spent:.2f} / ${budget_limit:.2f}",

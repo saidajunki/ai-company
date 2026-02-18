@@ -418,3 +418,24 @@ class AdaptiveMemoryEntry(BaseModel):
     importance: int = Field(default=3, ge=1, le=5)
     tags: List[str] = Field(default_factory=list)
     last_accessed_at: Optional[datetime] = None
+
+
+# --- Procedure SoT (verbatim runbook memory) ---
+
+class ProcedureDocument(BaseModel):
+    """複数行コマンド手順を丸ごと保存するSoTドキュメント。"""
+
+    doc_id: str
+    name: str
+    version: int = Field(default=1, ge=1)
+    created_at: datetime
+    updated_at: datetime
+    status: Literal["active", "superseded"] = "active"
+    visibility: Literal["private", "shared"] = "private"
+    steps: List[str] = Field(default_factory=list)
+    raw_text: str
+    source: str
+    user_id: Optional[str] = None
+    task_id: Optional[str] = None
+    file_path: str
+    tags: List[str] = Field(default_factory=list)

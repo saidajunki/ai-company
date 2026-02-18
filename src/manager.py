@@ -67,6 +67,7 @@ from memory_manager import MemoryManager
 from memory_vault import DEFAULT_CURATED_MEMORY, curated_memory_path, MemoryVault
 from policy_memory_store import PolicyMemoryStore
 from adaptive_memory_store import AdaptiveMemoryStore
+from procedure_store import ProcedureStore
 from web_searcher import WebSearcher
 from task_queue import TaskQueue
 from vision_loader import DEFAULT_VISION, VisionLoader
@@ -192,6 +193,7 @@ class Manager:
             self.memory_manager = None
         self.policy_memory = PolicyMemoryStore(base_dir, company_id)
         self.adaptive_memory = AdaptiveMemoryStore(base_dir, company_id)
+        self.procedure_store = ProcedureStore(base_dir, company_id)
 
         # Autonomous growth components
         self.vision_loader = VisionLoader(base_dir, company_id)
@@ -274,6 +276,12 @@ class Manager:
             self.adaptive_memory.compact_and_prune()
         except Exception:
             logger.warning("Failed to initialize adaptive memory", exc_info=True)
+
+        # Ensure procedure SoT store (verbatim runbooks)
+        try:
+            self.procedure_store.ensure_initialized()
+        except Exception:
+            logger.warning("Failed to initialize procedure store", exc_info=True)
 
         # Determine what to do first after wakeup
         action, description = determine_recovery_action(self.state)
@@ -787,6 +795,17 @@ class Manager:
             except Exception:
                 logger.warning("Failed to ingest adaptive memory from message", exc_info=True)
 
+            # Ingest verbatim procedure/runbook blocks into dedicated SoT
+            try:
+                self.procedure_store.ingest_text(
+                    stripped,
+                    source="creator_message",
+                    user_id=user_id,
+                    task_id=task_id,
+                )
+            except Exception:
+                logger.warning("Failed to ingest procedure SoT from message", exc_info=True)
+
             # --- Creator directive (pause/cancel/resume) ---
             try:
                 directive = parse_creator_directive(stripped, thread_context=slack_thread_context)
@@ -818,9 +837,24 @@ class Manager:
                     f"- システムプロンプト: `{repo_root}/src/context_builder.py` の `build_system_prompt()`\n"
                     f"- 読み込み元: `{repo_root}/src/manager.py` の `process_message()`\n"
                     f"- 主要ロジック: `{repo_root}/src/`\n"
+                    f"- 手順SoT: `{repo_root}/data/companies/{self.company_id}/state/procedures.ndjson`\n"
                     f"- 再読込フラグ: `{restart_flag}`\n\n"
                     "必要なら私自身がコード編集→self_commit→再読込まで実行できます。"
                 )
+                return
+
+            if self._is_procedure_library_request(stripped):
+                self._slack_send(
+                    "保存済み手順SoT一覧:\n"
+                    f"{self.procedure_store.format_library(limit=12, include_steps=False)}\n\n"
+                    "社内共有手順SoT一覧:\n"
+                    f"{self.procedure_store.format_shared(limit=12)}"
+                )
+                return
+
+            recalled_procedure = self.procedure_store.find_best_for_request(stripped)
+            if recalled_procedure is not None:
+                self._slack_send(self.procedure_store.render_reply(recalled_procedure))
                 return
 
             # Creator score feedback (KPI loop)
@@ -1003,6 +1037,21 @@ class Manager:
             except Exception:
                 logger.warning("Failed to load adaptive memory context", exc_info=True)
 
+            # Load procedure SoT context (verbatim runbooks + shared docs)
+            procedure_library_text = None
+            shared_procedure_text = None
+            try:
+                procedure_library_text = self.procedure_store.format_library(limit=12, include_steps=True)
+                shared_procedure_text = self.procedure_store.format_shared(limit=12)
+            except Exception:
+                logger.warning("Failed to load procedure SoT context", exc_info=True)
+
+            sot_policy_text = (
+                "- SoT優先順: 会社内SoT(手順/共有ドキュメント/方針) → Web一次情報。\n"
+                "- VPSや社内運用に関わる判断は、まず保存済み手順SoTを参照する。\n"
+                "- 外部仕様（git/サービスAPI/OSS仕様）で鮮度が必要ならWebで確認し、必要ならSoTへ反映する。"
+            )
+
             system_prompt = build_system_prompt(
                 constitution=self.state.constitution,
                 wip=self.state.wip,
@@ -1028,6 +1077,9 @@ class Manager:
                 policy_conflicts_text=policy_conflicts_text,
                 adaptive_memory_text=adaptive_memory_text,
                 adaptive_domains_text=adaptive_domains_text,
+                procedure_library_text=procedure_library_text,
+                shared_procedure_text=shared_procedure_text,
+                sot_policy_text=sot_policy_text,
             )
 
             conversation: list[dict[str, str]] = [
@@ -1364,6 +1416,16 @@ class Manager:
                             )
                         except Exception:
                             logger.warning("Failed to ingest adaptive memory from memory action", exc_info=True)
+
+                        try:
+                            self.procedure_store.ingest_text(
+                                payload,
+                                source=f"memory_{op}",
+                                user_id="ceo",
+                                task_id=task_id,
+                            )
+                        except Exception:
+                            logger.warning("Failed to ingest procedure SoT from memory action", exc_info=True)
                     except Exception as exc:
                         logger.warning("Memory action failed: %s", exc, exc_info=True)
                         result_text = f"メモリ保存エラー: {exc}"
@@ -1933,6 +1995,15 @@ class Manager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_procedure_library_request(text: str) -> bool:
+        normalized = (text or "").replace(" ", "").replace("　", "")
+        if not normalized:
+            return False
+        has_library_word = any(k in normalized for k in ("一覧", "リスト", "library", "ライブラリ", "どんな"))
+        has_target_word = any(k in normalized for k in ("手順", "runbook", "procedure", "共有"))
+        return has_library_word and has_target_word
 
     def _slack_send(
         self,
