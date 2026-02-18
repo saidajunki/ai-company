@@ -868,6 +868,25 @@ class Manager:
                     )
                 return
 
+            asks_web_search_impl = (
+                ("web検索" in normalized.lower() or "検索エンジン" in normalized.lower())
+                and any(k in normalized.lower() for k in ("何", "なに", "使", "仕組", "どのファイル", "どこ", "実装", "設定"))
+            )
+            if asks_web_search_impl:
+                self._trace_event("fast-path: web検索実装照会")
+                repo_root = Path(os.environ.get("APP_REPO_PATH", "/opt/apps/ai-company"))
+                backend = (os.environ.get("AI_COMPANY_WEB_SEARCH_BACKEND") or "searxng").strip() or "searxng"
+                searxng_url = (os.environ.get("AI_COMPANY_SEARXNG_URL") or "http://127.0.0.1:8088").strip() or "http://127.0.0.1:8088"
+                self._slack_send(
+                    "Web検索（<research>）は次の実装です。\n"
+                    f"- 実行箇所: `{repo_root}/src/manager.py` の `action_type==\"research\"`\n"
+                    f"- 検索実装: `{repo_root}/src/web_searcher.py` (WebSearcher)\n"
+                    f"- backend: `{backend}` (env: AI_COMPANY_WEB_SEARCH_BACKEND)\n"
+                    f"- SearxNG URL: `{searxng_url}` (env: AI_COMPANY_SEARXNG_URL)\n"
+                    f"- SearxNG compose: `/opt/apps/services/searxng/docker-compose.yml`"
+                )
+                return
+
             if self._is_agent_list_request(stripped):
                 self._trace_event("fast-path: 社員AI一覧を生成")
                 self._slack_send(self._build_agent_list_reply(stripped))
@@ -2412,16 +2431,18 @@ class Manager:
         """Return True when follow-up consists only of ack-like memory/reply actions."""
         if not actions:
             return False
-        has_memory = False
+
+        saw_any = False
         for action in actions:
             if action.action_type == "memory":
-                has_memory = True
+                saw_any = True
                 if not self._looks_like_memory_ack_payload(action.content):
                     return False
                 continue
             if action.action_type == "reply":
+                saw_any = True
                 if not self._looks_like_memory_ack_payload(action.content):
                     return False
                 continue
             return False
-        return has_memory
+        return saw_any
