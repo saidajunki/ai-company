@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from newsroom_team import (
@@ -97,3 +97,75 @@ B=hello
     data = _load_simple_env(env_file)
     assert data["A"] == "1"
     assert data["B"] == "hello"
+
+
+def test_normalize_state_adds_campaign_defaults(tmp_path: Path) -> None:
+    manager = _DummyManager(tmp_path)
+    team = NewsroomTeam(manager)
+
+    state = team._normalize_state({"posts": [], "seen_urls": []})
+    assert isinstance(state.get("campaign"), dict)
+    assert state["campaign"]["status"] == "running"
+    assert "started_at" in state["campaign"]
+
+
+def test_campaign_guard_blocks_when_hourly_budget_would_exceed(tmp_path: Path) -> None:
+    manager = _DummyManager(tmp_path)
+    team = NewsroomTeam(manager)
+
+    now = datetime.now(timezone.utc)
+    cfg = {
+        "budgets": {"post_usd": 0.1, "research_usd": 0.05, "writer_usd": 0.05},
+        "campaign": {
+            "enabled": True,
+            "target_posts": 100,
+            "hourly_budget_usd": 0.3,
+            "total_budget_usd": 10.0,
+            "max_runtime_hours": 10,
+        },
+    }
+    state = team._normalize_state(
+        {
+            "posts": [
+                {"posted_at": (now - timedelta(minutes=40)).isoformat()},
+                {"posted_at": (now - timedelta(minutes=30)).isoformat()},
+                {"posted_at": (now - timedelta(minutes=20)).isoformat()},
+            ],
+            "seen_urls": [],
+        }
+    )
+
+    can_post, reason = team._campaign_allows_posting(cfg, state)
+    assert can_post is False
+    assert reason is not None
+    assert "hourly budget guard" in reason
+
+
+def test_campaign_guard_completes_when_target_reached(tmp_path: Path) -> None:
+    manager = _DummyManager(tmp_path)
+    team = NewsroomTeam(manager)
+
+    cfg = {
+        "budgets": {"post_usd": 0.1, "research_usd": 0.05, "writer_usd": 0.05},
+        "campaign": {
+            "enabled": True,
+            "target_posts": 2,
+            "hourly_budget_usd": 1.0,
+            "total_budget_usd": 10.0,
+            "max_runtime_hours": 10,
+        },
+    }
+    state = team._normalize_state(
+        {
+            "posts": [
+                {"posted_at": datetime.now(timezone.utc).isoformat()},
+                {"posted_at": datetime.now(timezone.utc).isoformat()},
+            ],
+            "seen_urls": [],
+        }
+    )
+
+    can_post, reason = team._campaign_allows_posting(cfg, state)
+    assert can_post is False
+    assert reason is None
+    assert state["campaign"]["status"] == "completed"

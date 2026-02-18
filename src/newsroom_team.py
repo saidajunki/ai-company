@@ -17,7 +17,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import xmlrpc.client
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
 from pathlib import Path
@@ -41,6 +41,15 @@ DEFAULT_NEWSROOM_SOURCES = {
         "categories": ["ニュース", "AI", "テクノロジー"],
         "status": "publish",
     },
+    "campaign": {
+        "enabled": True,
+        "topic": "最新のAI技術を紹介し、技術力をアピールする",
+        "target_posts": 100,
+        "hourly_budget_usd": 1.0,
+        "total_budget_usd": 10.0,
+        "max_runtime_hours": 10,
+        "report_every_posts": 10,
+    },
     "sources": [
         {
             "name": "TechCrunch AI",
@@ -59,6 +68,38 @@ DEFAULT_NEWSROOM_SOURCES = {
         },
     ],
 }
+
+DEFAULT_NEWSROOM_STATE = {
+    "last_run_at": None,
+    "last_post_at": None,
+    "seen_urls": [],
+    "posts": [],
+    "campaign": {
+        "status": "running",
+        "started_at": None,
+        "ended_at": None,
+        "stop_reason": None,
+        "last_budget_skip_at": None,
+        "last_reported_posts": 0,
+    },
+}
+
+DEFAULT_NEWSROOM_EMPLOYEES = (
+    {
+        "name": "神谷リサ",
+        "role": "news-researcher",
+        "purpose": "最新AIニュースの一次情報を調査し、事実整理を行う",
+        "env_model": "AI_COMPANY_NEWS_RESEARCH_MODEL",
+        "default_model": "openai/gpt-4.1-mini",
+    },
+    {
+        "name": "綾瀬文香",
+        "role": "news-writer",
+        "purpose": "調査結果を日本語の技術解説記事として構成する",
+        "env_model": "AI_COMPANY_NEWS_WRITER_MODEL",
+        "default_model": "openai/gpt-4.1",
+    },
+)
 
 
 @dataclass
@@ -147,16 +188,7 @@ class NewsroomTeam:
 
         if not self.state_path.exists():
             self.state_path.write_text(
-                json.dumps(
-                    {
-                        "last_run_at": None,
-                        "last_post_at": None,
-                        "seen_urls": [],
-                        "posts": [],
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ) + "\n",
+                json.dumps(DEFAULT_NEWSROOM_STATE, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
 
@@ -175,6 +207,15 @@ class NewsroomTeam:
 
         cfg = self._load_sources_config()
         state = self._load_state()
+        state = self._normalize_state(state)
+
+        can_proceed, block_reason = self._campaign_allows_posting(cfg, state)
+        if not can_proceed:
+            state["last_run_at"] = _utc_now().isoformat()
+            self._save_state(state)
+            if block_reason:
+                self._activity(f"ニュース部隊待機: {block_reason}")
+            return
 
         if not self._interval_ready(cfg, state):
             return
@@ -186,17 +227,22 @@ class NewsroomTeam:
             self._activity("ニュース部隊: 新規候補なし（RSS更新待ち）")
             return
 
+        team = self._ensure_newsroom_employees(cfg)
+        researcher_profile = team.get("news-researcher") or {}
+        writer_profile = team.get("news-writer") or {}
+
         self._activity(
             "CEO→社員AI 委任: role=news-researcher "
             f"task=最新ニュース調査 ({_short(candidate.title, 100)})"
         )
         research_result = self.manager.sub_agent_runner.spawn(
-            name="news-researcher",
+            name=str(researcher_profile.get("name") or "news-researcher"),
             role="news-researcher",
             task_description=self._build_research_task(candidate),
             budget_limit_usd=self._research_budget(cfg),
             model=os.environ.get("AI_COMPANY_NEWS_RESEARCH_MODEL", "openai/gpt-4.1-mini"),
             ignore_wip_limit=True,
+            persistent_employee=researcher_profile,
         )
 
         self._activity(
@@ -204,12 +250,13 @@ class NewsroomTeam:
             f"task=記事作成 ({_short(candidate.title, 100)})"
         )
         writer_result = self.manager.sub_agent_runner.spawn(
-            name="news-writer",
+            name=str(writer_profile.get("name") or "news-writer"),
             role="news-writer",
             task_description=self._build_writer_task(candidate, research_result),
             budget_limit_usd=self._writer_budget(cfg),
             model=os.environ.get("AI_COMPANY_NEWS_WRITER_MODEL", "openai/gpt-4.1"),
             ignore_wip_limit=True,
+            persistent_employee=writer_profile,
         )
 
         article = self._parse_article_payload(writer_result, candidate)
@@ -247,14 +294,21 @@ class NewsroomTeam:
         )
         state["posts"] = posts[-200:]
 
+        self._refresh_campaign_progress(cfg, state)
         self._save_state(state)
         self._archive_article(article, candidate, post_id, now)
 
+        campaign_cfg = self._campaign_config(cfg)
+        post_count = len(state.get("posts") or [])
+        target_posts = int(campaign_cfg.get("target_posts", 100))
+        est_cost = self._estimated_total_spent(cfg, state)
         msg = (
             "📰 ニュース投稿完了\n"
             f"- タイトル: {article['title']}\n"
             f"- WordPress post_id: {post_id}\n"
-            f"- 元ニュース: {candidate.url}"
+            f"- 元ニュース: {candidate.url}\n"
+            f"- 進捗: {post_count}/{target_posts} 投稿\n"
+            f"- 推定総コスト: ${est_cost:.2f}"
         )
         self._slack(msg)
         self._activity(f"ニュース部隊完了: title={_short(article['title'], 120)} post_id={post_id}")
@@ -279,18 +333,256 @@ class NewsroomTeam:
                 return data
         except Exception:
             logger.warning("Failed to load newsroom state", exc_info=True)
-        return {
-            "last_run_at": None,
-            "last_post_at": None,
-            "seen_urls": [],
-            "posts": [],
-        }
+        return dict(DEFAULT_NEWSROOM_STATE)
 
     def _save_state(self, state: dict[str, Any]) -> None:
         self.state_path.write_text(
             json.dumps(state, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    @staticmethod
+    def _normalize_state(state: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(DEFAULT_NEWSROOM_STATE)
+        normalized.update(state if isinstance(state, dict) else {})
+
+        campaign = dict(DEFAULT_NEWSROOM_STATE.get("campaign") or {})
+        if isinstance(state.get("campaign"), dict):  # type: ignore[union-attr]
+            campaign.update(state.get("campaign"))  # type: ignore[arg-type]
+        normalized["campaign"] = campaign
+
+        posts = normalized.get("posts")
+        normalized["posts"] = posts if isinstance(posts, list) else []
+        seen_urls = normalized.get("seen_urls")
+        normalized["seen_urls"] = seen_urls if isinstance(seen_urls, list) else []
+        return normalized
+
+    def _campaign_config(self, cfg: dict[str, Any]) -> dict[str, Any]:
+        base = dict(DEFAULT_NEWSROOM_SOURCES.get("campaign") or {})
+        custom = cfg.get("campaign")
+        if isinstance(custom, dict):
+            base.update(custom)
+
+        env_map = {
+            "enabled": os.environ.get("AI_COMPANY_NEWS_CAMPAIGN_ENABLED"),
+            "target_posts": os.environ.get("AI_COMPANY_NEWS_TARGET_POSTS"),
+            "hourly_budget_usd": os.environ.get("AI_COMPANY_NEWS_HOURLY_BUDGET_USD"),
+            "total_budget_usd": os.environ.get("AI_COMPANY_NEWS_TOTAL_BUDGET_USD"),
+            "max_runtime_hours": os.environ.get("AI_COMPANY_NEWS_MAX_RUNTIME_HOURS"),
+            "report_every_posts": os.environ.get("AI_COMPANY_NEWS_REPORT_EVERY_POSTS"),
+        }
+        for key, raw in env_map.items():
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if not text:
+                continue
+            if key == "enabled":
+                base[key] = text.lower() not in ("0", "false", "off", "no")
+            elif key in ("target_posts", "report_every_posts"):
+                try:
+                    base[key] = max(1, int(text))
+                except Exception:
+                    pass
+            else:
+                try:
+                    base[key] = max(0.1, float(text))
+                except Exception:
+                    pass
+        return base
+
+    def _campaign_allows_posting(
+        self,
+        cfg: dict[str, Any],
+        state: dict[str, Any],
+    ) -> tuple[bool, str | None]:
+        campaign_cfg = self._campaign_config(cfg)
+        campaign_state = state.get("campaign") if isinstance(state.get("campaign"), dict) else {}
+        if not isinstance(campaign_state, dict):
+            campaign_state = {}
+            state["campaign"] = campaign_state
+
+        enabled = bool(campaign_cfg.get("enabled", True))
+        if not enabled:
+            campaign_state["status"] = "disabled"
+            return False, None
+
+        if str(campaign_state.get("status") or "").strip() == "completed":
+            return False, None
+
+        now = _utc_now()
+        if not str(campaign_state.get("started_at") or "").strip():
+            campaign_state["started_at"] = now.isoformat()
+
+        post_cost = self._estimated_post_cost(cfg)
+        posts = state.get("posts") if isinstance(state.get("posts"), list) else []
+        post_count = len(posts)
+        target_posts = _safe_int(campaign_cfg.get("target_posts"), default=100, minimum=1)
+        total_budget = max(post_cost, _safe_float(campaign_cfg.get("total_budget_usd"), default=10.0, minimum=0.1))
+        hourly_budget = max(post_cost, _safe_float(campaign_cfg.get("hourly_budget_usd"), default=1.0, minimum=0.1))
+        max_runtime_hours = _safe_float(campaign_cfg.get("max_runtime_hours"), default=10.0, minimum=0.1)
+
+        if post_count >= target_posts:
+            self._complete_campaign(
+                state,
+                reason=f"目標投稿数に到達 ({post_count}/{target_posts})",
+                cfg=cfg,
+            )
+            return False, None
+
+        total_spent = self._estimated_total_spent(cfg, state)
+        if total_spent + post_cost > total_budget + 1e-9:
+            self._complete_campaign(
+                state,
+                reason=f"総予算上限に到達 (${total_spent:.2f}/${total_budget:.2f})",
+                cfg=cfg,
+            )
+            return False, None
+
+        started_at = _parse_iso_datetime(str(campaign_state.get("started_at") or ""))
+        if started_at is not None and (now - started_at).total_seconds() >= max_runtime_hours * 3600:
+            self._complete_campaign(
+                state,
+                reason=f"稼働時間上限に到達 ({max_runtime_hours:.1f}h)",
+                cfg=cfg,
+            )
+            return False, None
+
+        hourly_spent = self._estimated_hourly_spent(cfg, state)
+        if hourly_spent + post_cost > hourly_budget + 1e-9:
+            campaign_state["status"] = "throttled"
+            last_skip = _parse_iso_datetime(str(campaign_state.get("last_budget_skip_at") or ""))
+            campaign_state["last_budget_skip_at"] = now.isoformat()
+            if last_skip is not None and (now - last_skip).total_seconds() < 300:
+                return False, None
+            return False, f"hourly budget guard (${hourly_spent:.2f}/${hourly_budget:.2f})"
+
+        campaign_state["status"] = "running"
+        return True, None
+
+    def _complete_campaign(self, state: dict[str, Any], *, reason: str, cfg: dict[str, Any]) -> None:
+        now = _utc_now()
+        campaign_state = state.get("campaign")
+        if not isinstance(campaign_state, dict):
+            campaign_state = {}
+            state["campaign"] = campaign_state
+        already_completed = str(campaign_state.get("status") or "").strip() == "completed"
+        campaign_state["status"] = "completed"
+        if not str(campaign_state.get("started_at") or "").strip():
+            campaign_state["started_at"] = now.isoformat()
+        campaign_state["ended_at"] = now.isoformat()
+        campaign_state["stop_reason"] = reason
+
+        if already_completed:
+            return
+
+        posts = state.get("posts") if isinstance(state.get("posts"), list) else []
+        target_posts = int(self._campaign_config(cfg).get("target_posts", 100))
+        total_cost = self._estimated_total_spent(cfg, state)
+        self._slack(
+            "✅ ニュース運営キャンペーン完了\n"
+            f"- 理由: {reason}\n"
+            f"- 投稿数: {len(posts)}/{target_posts}\n"
+            f"- 推定総コスト: ${total_cost:.2f}"
+        )
+        self._activity(f"ニュース部隊キャンペーン完了: {reason}")
+
+    def _refresh_campaign_progress(self, cfg: dict[str, Any], state: dict[str, Any]) -> None:
+        campaign_cfg = self._campaign_config(cfg)
+        campaign_state = state.get("campaign") if isinstance(state.get("campaign"), dict) else {}
+        if not isinstance(campaign_state, dict):
+            campaign_state = {}
+            state["campaign"] = campaign_state
+
+        posts = state.get("posts") if isinstance(state.get("posts"), list) else []
+        report_every = _safe_int(campaign_cfg.get("report_every_posts"), default=10, minimum=1)
+        last_reported = _safe_int(campaign_state.get("last_reported_posts"), default=0, minimum=0)
+        current = len(posts)
+
+        if current >= last_reported + report_every:
+            target_posts = _safe_int(campaign_cfg.get("target_posts"), default=100, minimum=1)
+            spent = self._estimated_total_spent(cfg, state)
+            self._slack(
+                "📈 ニュース運営キャンペーン進捗\n"
+                f"- 投稿数: {current}/{target_posts}\n"
+                f"- 推定総コスト: ${spent:.2f}"
+            )
+            campaign_state["last_reported_posts"] = current
+
+        if current >= _safe_int(campaign_cfg.get("target_posts"), default=100, minimum=1):
+            self._complete_campaign(
+                state,
+                reason=f"目標投稿数に到達 ({current}/{campaign_cfg.get('target_posts', 100)})",
+                cfg=cfg,
+            )
+
+    def _ensure_newsroom_employees(self, cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        store = getattr(self.manager, "employee_store", None)
+        if store is None:
+            return out
+
+        post_budget = self._estimated_post_cost(cfg)
+        research_budget = max(0.05, min(self._research_budget(cfg), post_budget))
+        writer_budget = max(0.05, min(self._writer_budget(cfg), post_budget))
+        budget_by_role = {
+            "news-researcher": research_budget,
+            "news-writer": writer_budget,
+        }
+
+        for profile in DEFAULT_NEWSROOM_EMPLOYEES:
+            model = (
+                os.environ.get(str(profile.get("env_model") or ""), str(profile.get("default_model") or ""))
+                or str(profile.get("default_model") or "openai/gpt-4.1-mini")
+            ).strip() or "openai/gpt-4.1-mini"
+            role = str(profile.get("role") or "").strip()
+            if not role:
+                continue
+            name = str(profile.get("name") or role).strip() or role
+            purpose = str(profile.get("purpose") or role).strip() or role
+            budget = budget_by_role.get(role, max(0.05, post_budget))
+            try:
+                entry, created = store.ensure_active(
+                    name=name,
+                    role=role,
+                    purpose=purpose,
+                    model=model,
+                    budget_limit_usd=budget,
+                )
+                out[role] = entry.model_dump()
+                if created:
+                    self._activity(
+                        f"CEO→社員AI 雇用: name={entry.name} role={entry.role} model={entry.model} budget=${entry.budget_limit_usd:.2f}"
+                    )
+            except Exception:
+                logger.warning("Failed to ensure newsroom employee: %s", role, exc_info=True)
+        return out
+
+    def _estimated_post_cost(self, cfg: dict[str, Any]) -> float:
+        research = self._research_budget(cfg)
+        writer = self._writer_budget(cfg)
+        return max(0.1, research + writer)
+
+    def _estimated_total_spent(self, cfg: dict[str, Any], state: dict[str, Any]) -> float:
+        posts = state.get("posts") if isinstance(state.get("posts"), list) else []
+        return len(posts) * self._estimated_post_cost(cfg)
+
+    def _estimated_hourly_spent(self, cfg: dict[str, Any], state: dict[str, Any]) -> float:
+        posts = state.get("posts") if isinstance(state.get("posts"), list) else []
+        if not posts:
+            return 0.0
+        now = _utc_now()
+        threshold = now - timedelta(hours=1)
+        count = 0
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+            posted_at = _parse_iso_datetime(str(post.get("posted_at") or ""))
+            if posted_at is None:
+                continue
+            if posted_at >= threshold:
+                count += 1
+        return count * self._estimated_post_cost(cfg)
 
     # ------------------------------------------------------------------
     # Candidate selection
@@ -587,11 +879,11 @@ class NewsroomTeam:
         env = (os.environ.get("AI_COMPANY_NEWS_POST_BUDGET_USD") or "").strip()
         if env:
             try:
-                return max(0.05, float(env))
+                return max(0.1, float(env))
             except Exception:
                 pass
         try:
-            return max(0.05, float(cfg.get("budgets", {}).get("post_usd", 0.5)))
+            return max(0.1, float(cfg.get("budgets", {}).get("post_usd", 0.5)))
         except Exception:
             return 0.5
 
@@ -840,6 +1132,33 @@ def _short(text: str, limit: int) -> str:
     if len(s) > limit:
         return s[:limit] + "…"
     return s
+
+
+def _safe_int(value: Any, *, default: int, minimum: int) -> int:
+    try:
+        return max(minimum, int(value))
+    except Exception:
+        return max(minimum, default)
+
+
+def _safe_float(value: Any, *, default: float, minimum: float) -> float:
+    try:
+        return max(minimum, float(value))
+    except Exception:
+        return max(minimum, default)
+
+
+def _parse_iso_datetime(text: str) -> datetime | None:
+    s = (text or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _utc_now() -> datetime:
