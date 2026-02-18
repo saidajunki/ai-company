@@ -31,6 +31,13 @@ class CreatorDirective:
 _TASK_ID_RE = re.compile(r"task_id\s*[:：]\s*([0-9a-f]{8})", re.IGNORECASE)
 _CONSULT_ID_RE = re.compile(r"consult_id\s*[:：]\s*([0-9a-f]{8})", re.IGNORECASE)
 _INITIATIVE_ID_RE = re.compile(r"initiative_id\s*[:：]\s*([0-9a-f]{8,})", re.IGNORECASE)
+_RESUME_INTENT_RE = re.compile(r"(?:^|[\s　、。,:：])(?:保留解除|再開(?:して)?)(?:$|[\s　、。,:：]|で|を)")
+_CANCEL_INTENT_RE = re.compile(
+    r"(?:^|[\s　、。,:：])(?:やめて|中止|停止|ストップ|廃止|打ち切|もうやらない|やらなくていい|止めて)(?!時)(?:$|[\s　、。,:：]|で|を|して)",
+)
+_PAUSE_INTENT_RE = re.compile(
+    r"(?:保留(?:で|して)?|凍結|後回し|あとで|棚上げ|一旦置いといて)",
+)
 
 
 def _last_match(pattern: re.Pattern[str], text: str) -> str | None:
@@ -50,6 +57,10 @@ def _derive_query(text: str) -> str | None:
 
 
 def _looks_like_directive_text(raw: str, normalized: str) -> bool:
+    compact = " ".join((normalized or "").split())
+    if len(compact) > 120:
+        return False
+
     if _TASK_ID_RE.search(raw) or _CONSULT_ID_RE.search(raw) or _INITIATIVE_ID_RE.search(raw):
         return True
 
@@ -107,11 +118,11 @@ def parse_creator_directive(
     normalized = raw.replace("　", " ")
 
     # Resume has higher priority when "保留解除" is present.
-    if any(k in normalized for k in ("保留解除", "再開", "再開して")):
+    if _RESUME_INTENT_RE.search(normalized):
         kind: DirectiveKind = "resume"
-    elif any(k in normalized for k in ("やめて", "中止", "停止", "ストップ", "廃止", "打ち切", "もうやらない", "やらなくていい")):
+    elif _CANCEL_INTENT_RE.search(normalized):
         kind = "cancel"
-    elif any(k in normalized for k in ("保留", "凍結", "後回し", "あとで", "棚上げ", "一旦置いといて")):
+    elif _PAUSE_INTENT_RE.search(normalized):
         kind = "pause"
     else:
         return None

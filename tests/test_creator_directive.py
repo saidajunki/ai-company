@@ -25,3 +25,12 @@ def test_free_form_directive_with_task_id_is_detected():
     assert directive.kind == "pause"
     assert directive.task_id == "cafefeed"
 
+
+def test_long_multi_line_instruction_is_not_treated_as_directive():
+    text = (
+        "Webサイト運営の方針です。\\n"
+        "停止時はCreatorへ報告してください。\\n"
+        "最新AI技術を継続的に扱ってください。"
+    )
+    directive = parse_creator_directive(text)
+    assert directive is None
