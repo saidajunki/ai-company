@@ -845,7 +845,7 @@ class Manager:
                 return
 
             if self._is_agent_list_request(stripped):
-                self._slack_send(self._build_agent_list_reply())
+                self._slack_send(self._build_agent_list_reply(stripped))
                 return
 
             if self._is_procedure_library_request(stripped):
@@ -2077,7 +2077,7 @@ class Manager:
         )
         has_example_intent = any(
             k in normalized
-            for k in ("要求された時", "聞かれた時", "訊かれた時", "への回答", "に答えられる", "を返せる")
+            for k in ("要求された時", "要求されたとき", "聞かれた時", "聞かれたとき", "訊かれた時", "訊かれたとき", "尋ねられた時", "尋ねられたとき", "への回答", "に答えられる", "を返せる", "答えるように", "できるように", "ようにしてください")
         )
         if has_meta_intent or has_example_intent:
             return False
@@ -2093,7 +2093,7 @@ class Manager:
         has_procedure_hint = any(k in normalized for k in ("手順", "runbook", "procedure", "sot"))
         return has_agent_word and has_list_word and not has_procedure_hint
 
-    def _build_agent_list_reply(self) -> str:
+    def _build_agent_list_reply(self, request_text: str = "") -> str:
         try:
             all_agents = [a for a in self.agent_registry._list_all() if a.agent_id != "ceo"]
         except Exception:
@@ -2101,25 +2101,37 @@ class Manager:
             return "社員AIの一覧取得中にエラーが発生しました。もう一度試してください。"
 
         if not all_agents:
-            return "現在、社員AIはまだ作成されていません。必要なら役割を指定して作成します。"
+            return "現在、社員AIはまだ作成されていません。"
+
+        normalized = (request_text or "").replace(" ", "").replace("　", "").lower()
+        asks_recent = any(k in normalized for k in ("最近", "直近", "動いて", "稼働", "アクティブ", "現在"))
 
         all_agents.sort(key=lambda a: a.updated_at, reverse=True)
         active_agents = [a for a in all_agents if a.status == "active"]
 
+        def _fmt_agent_line(agent) -> str:
+            ts = agent.updated_at.strftime("%Y-%m-%d %H:%M")
+            model = (agent.model or "unknown").strip() or "unknown"
+            return (
+                f"- {agent.name}（role={agent.role} / status={agent.status} / "
+                f"model={model} / updated={ts} UTC）"
+            )
+
         lines: list[str] = []
         if active_agents:
-            lines.append(f"最近動いている社員AIは {len(active_agents)} 名です。")
+            lines.append(f"現在稼働中の社員AIは {len(active_agents)} 名です。")
             for agent in active_agents[:8]:
-                ts = agent.updated_at.strftime("%Y-%m-%d %H:%M")
-                lines.append(f"- {agent.name}（{agent.role}） model={agent.model} / 更新: {ts} UTC")
+                lines.append(_fmt_agent_line(agent))
+            if not asks_recent and len(all_agents) > len(active_agents):
+                lines.append("直近で停止した社員AI:")
+                for agent in [a for a in all_agents if a.status != "active"][:3]:
+                    lines.append(_fmt_agent_line(agent))
         else:
             lines.append("現在アクティブな社員AIはいません。")
-            lines.append("直近で動いていた社員AI:")
+            lines.append("直近で動いていた社員AI（モデル付き）:")
             for agent in all_agents[:5]:
-                ts = agent.updated_at.strftime("%Y-%m-%d %H:%M")
-                lines.append(f"- {agent.name}（{agent.role} / {agent.status}） 更新: {ts} UTC")
+                lines.append(_fmt_agent_line(agent))
 
-        lines.append("必要なら、この中から担当を指定して次タスクを振り分けます。")
         return "\n".join(lines)
 
     @staticmethod
