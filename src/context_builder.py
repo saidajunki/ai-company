@@ -92,6 +92,8 @@ def build_system_prompt(
         "- 共有手順SoT: /opt/apps/ai-company/data/companies/alpha/knowledge/shared/procedures/",
         "- 記憶ドメイン: /opt/apps/ai-company/data/companies/alpha/knowledge/domains/",
         "- MCPサーバ設定: /opt/apps/ai-company/data/companies/alpha/protocols/mcp_servers.yaml",
+        "- ニュースソースSoT: /opt/apps/ai-company/data/companies/alpha/protocols/newsroom_sources.yaml",
+        "- ニュース投稿状態: /opt/apps/ai-company/data/companies/alpha/state/newsroom_state.json",
         "- 再読込フラグ: /opt/apps/ai-company/data/companies/alpha/state/restart_manager.flag",
         "",
         "## 会社憲法",

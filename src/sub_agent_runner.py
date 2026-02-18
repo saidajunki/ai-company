@@ -182,6 +182,7 @@ class SubAgentRunner:
         task_description: str,
         budget_limit_usd: float = 1.0,
         model: str | None = None,
+        ignore_wip_limit: bool = False,
     ) -> str:
         """サブエージェントをスポーンし、タスクを実行する.
 
@@ -191,17 +192,19 @@ class SubAgentRunner:
             task_description: タスクの説明
             budget_limit_usd: 予算上限（USD）
             model: 使用するLLMモデル名。未指定/空文字列の場合はCEO_AIのモデルにフォールバック。
+            ignore_wip_limit: True の場合、WIP制限を無視してスポーンする。
 
         Returns:
             結果文字列（完了メッセージまたはエラー）
         """
         # WIP limit check: count active agents excluding CEO
-        active_agents = self.manager.agent_registry.list_active()
-        non_ceo_active = [a for a in active_agents if a.agent_id != "ceo"]
-        if len(non_ceo_active) >= DEFAULT_WIP_LIMIT:
-            msg = f"WIP制限({DEFAULT_WIP_LIMIT})に達しているためスポーンできません"
-            logger.warning(msg)
-            return msg
+        if not ignore_wip_limit:
+            active_agents = self.manager.agent_registry.list_active()
+            non_ceo_active = [a for a in active_agents if a.agent_id != "ceo"]
+            if len(non_ceo_active) >= DEFAULT_WIP_LIMIT:
+                msg = f"WIP制限({DEFAULT_WIP_LIMIT})に達しているためスポーンできません"
+                logger.warning(msg)
+                return msg
 
         # Determine effective model (empty string treated as None)
         # 1. Explicit model= from delegate tag takes priority
@@ -383,6 +386,8 @@ class SubAgentRunner:
             f"- {company_root / 'state' / 'memory.sqlite3'}",
             f"- {company_root / 'state' / 'commitments.ndjson'}",
             f"- {company_root / 'protocols' / 'mcp_servers.yaml'}",
+            f"- {company_root / 'protocols' / 'newsroom_sources.yaml'}",
+            f"- {company_root / 'state' / 'newsroom_state.json'}",
             f"- {company_root / 'journal'}",
             "- /opt/apps/ai-company/tools/ai",
             "- /opt/apps/ai-company/tools/README.md",

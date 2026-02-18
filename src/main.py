@@ -52,6 +52,9 @@ AUTONOMOUS_ENABLED = os.environ.get("AUTONOMOUS_ENABLED", "1").strip().lower() n
 AUTONOMOUS_TICK_INTERVAL = int(os.environ.get("AUTONOMOUS_TICK_INTERVAL", "600"))
 AUTONOMOUS_IDLE_GRACE_SECONDS = int(os.environ.get("AUTONOMOUS_IDLE_GRACE_SECONDS", "120"))
 
+NEWSROOM_TEAM_ENABLED = os.environ.get("NEWSROOM_TEAM_ENABLED", "1").strip().lower() not in ("0", "false", "off", "no")
+NEWSROOM_TICK_INTERVAL = int(os.environ.get("NEWSROOM_TICK_INTERVAL", "3600"))
+
 _shutdown = False
 
 
@@ -112,6 +115,7 @@ def main() -> None:
     slack = None
     if SLACK_BOT_TOKEN and SLACK_APP_TOKEN:
         from autonomous_loop import AutonomousLoop
+        from newsroom_team import NewsroomTeam
         from slack_bot import SlackBot
 
         PRIORITY_CREATOR = 0
@@ -122,6 +126,7 @@ def main() -> None:
         job_seq = itertools.count()
         last_creator_activity_at = time.monotonic()
         autonomous_job_pending = threading.Event()
+        newsroom_job_pending = threading.Event()
 
         def enqueue(kind: str, payload: dict, priority: int) -> None:
             job_queue.put((priority, next(job_seq), kind, payload))
@@ -385,6 +390,9 @@ def main() -> None:
         # Autonomous loop (CEO decides next action periodically)
         mgr.autonomous_loop = AutonomousLoop(mgr)
 
+        # Autonomous newsroom team (RSS -> article -> WordPress)
+        mgr.newsroom_team = NewsroomTeam(mgr)
+
         def worker_loop() -> None:
             log.info("Job worker started")
             while not _shutdown:
@@ -419,6 +427,12 @@ def main() -> None:
                             mgr.autonomous_loop.tick()
                         finally:
                             autonomous_job_pending.clear()
+                    elif kind == "newsroom_tick":
+                        log.info("Newsroom tick start")
+                        try:
+                            mgr.newsroom_team.tick()
+                        finally:
+                            newsroom_job_pending.clear()
                     else:
                         log.warning("Unknown job kind: %s", kind)
                 except Exception:
@@ -455,6 +469,26 @@ def main() -> None:
 
         ticker = threading.Thread(target=autonomy_ticker, daemon=True, name="autonomy-ticker")
         ticker.start()
+
+        def newsroom_ticker() -> None:
+            if not NEWSROOM_TEAM_ENABLED:
+                log.info("Newsroom team disabled (NEWSROOM_TEAM_ENABLED=0)")
+                return
+
+            last_tick = 0.0
+            log.info("Newsroom ticker enabled (interval=%ds)", NEWSROOM_TICK_INTERVAL)
+
+            while not _shutdown:
+                now = time.monotonic()
+                if now - last_tick >= NEWSROOM_TICK_INTERVAL:
+                    if not newsroom_job_pending.is_set():
+                        newsroom_job_pending.set()
+                        enqueue("newsroom_tick", {}, PRIORITY_AUTONOMY)
+                        last_tick = now
+                time.sleep(1)
+
+        newsroom = threading.Thread(target=newsroom_ticker, daemon=True, name="newsroom-ticker")
+        newsroom.start()
     else:
         log.warning("SLACK_BOT_TOKEN or SLACK_APP_TOKEN not set – running without Slack")
     # --- Main loop ---

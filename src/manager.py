@@ -143,6 +143,35 @@ def init_company_directory(base_dir: Path, company_id: str) -> None:
             encoding="utf-8",
         )
 
+    # Newsroom sources config (RSS SoT)
+    newsroom_sources_file = company_root / "protocols" / "newsroom_sources.yaml"
+    if not newsroom_sources_file.exists():
+        newsroom_sources_file.write_text(
+            "\n".join([
+                "schedule:",
+                "  interval_minutes: 60",
+                "budgets:",
+                "  post_usd: 0.5",
+                "  research_usd: 0.2",
+                "  writer_usd: 0.25",
+                "wordpress:",
+                "  categories: [\"ニュース\", \"AI\", \"テクノロジー\"]",
+                "  status: publish",
+                "sources:",
+                "  - name: \"TechCrunch AI\"",
+                "    rss: \"https://techcrunch.com/category/artificial-intelligence/feed/\"",
+                "    keywords: [\"ai\", \"artificial intelligence\", \"llm\", \"model\", \"agent\"]",
+                "  - name: \"VentureBeat AI\"",
+                "    rss: \"https://venturebeat.com/category/ai/feed/\"",
+                "    keywords: [\"ai\", \"llm\", \"model\", \"inference\", \"agent\"]",
+                "  - name: \"The Verge AI\"",
+                "    rss: \"https://www.theverge.com/rss/ai-artificial-intelligence/index.xml\"",
+                "    keywords: [\"ai\", \"artificial intelligence\", \"model\", \"robot\", \"agent\"]",
+                "",
+            ]),
+            encoding="utf-8",
+        )
+
 # ---------------------------------------------------------------------------
 # TaskStep dataclass (Req 5.1, 5.3, 5.4)
 # ---------------------------------------------------------------------------
@@ -235,6 +264,7 @@ class Manager:
         self.service_registry = ServiceRegistry(base_dir, company_id)
         self.sub_agent_runner = SubAgentRunner(self)
         self.autonomous_loop = None
+        self.newsroom_team = None
         self.web_searcher = WebSearcher()
         self.mcp_client = MCPClient(base_dir, company_id)
         self.research_note_store = ResearchNoteStore(base_dir, company_id)
