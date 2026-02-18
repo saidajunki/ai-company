@@ -12,9 +12,12 @@ Req 3.2: Reports sent to Slack.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import os
+import queue
 import signal
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +47,10 @@ SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
 CREATOR_SLACK_USER_ID = os.environ.get("CREATOR_SLACK_USER_ID", "").strip() or None
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-3.5-haiku")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
+AUTONOMOUS_ENABLED = os.environ.get("AUTONOMOUS_ENABLED", "1").strip().lower() not in ("0", "false", "off", "no")
+AUTONOMOUS_TICK_INTERVAL = int(os.environ.get("AUTONOMOUS_TICK_INTERVAL", "600"))
+AUTONOMOUS_IDLE_GRACE_SECONDS = int(os.environ.get("AUTONOMOUS_IDLE_GRACE_SECONDS", "120"))
 
 _shutdown = False
 
@@ -75,6 +82,10 @@ def main() -> None:
     if OPENROUTER_API_KEY:
         mgr.llm_client = LLMClient(api_key=OPENROUTER_API_KEY, model=OPENROUTER_MODEL)
         log.info("LLM client initialized (model: %s)", OPENROUTER_MODEL)
+        try:
+            mgr.refresh_pricing_cache(api_key=OPENROUTER_API_KEY)
+        except Exception:
+            log.warning("Failed to refresh pricing cache", exc_info=True)
         # Update CEO agent model (may have been registered as "unknown" during startup)
         try:
             ceo = mgr.agent_registry.get("ceo")
@@ -100,9 +111,22 @@ def main() -> None:
     # --- Slack integration ---
     slack = None
     if SLACK_BOT_TOKEN and SLACK_APP_TOKEN:
+        from autonomous_loop import AutonomousLoop
         from slack_bot import SlackBot
 
-        def on_reaction(request_id: str, result: str, user_id: str) -> None:
+        PRIORITY_CREATOR = 0
+        PRIORITY_AUTONOMY = 10
+
+        # Serialize Manager access (Slack callbacks + autonomous tick) to avoid races.
+        job_queue: "queue.PriorityQueue[tuple[int, int, str, dict]]" = queue.PriorityQueue()
+        job_seq = itertools.count()
+        last_creator_activity_at = time.monotonic()
+        autonomous_job_pending = threading.Event()
+
+        def enqueue(kind: str, payload: dict, priority: int) -> None:
+            job_queue.put((priority, next(job_seq), kind, payload))
+
+        def handle_reaction(request_id: str, result: str, user_id: str) -> None:
             log.info("Approval %s for %s by %s", result, request_id, user_id)
 
             # Find the proposal in decision_log by request_id
@@ -176,7 +200,7 @@ def main() -> None:
                     f"⚠️ 承認処理中にエラーが発生しました (request_id: {request_id})"
                 )
 
-        def on_approval_text(
+        def handle_approval_text(
             request_id: str,
             text: str,
             user_id: str,
@@ -184,7 +208,6 @@ def main() -> None:
             thread_ts: str | None = None,
             thread_context: str | None = None,
         ) -> None:
-            """Handle free-form approval replies (thread reply preferred)."""
             log.info("Approval text for %s by %s: %s", request_id, user_id, text[:120])
 
             def _reply(message: str) -> None:
@@ -226,7 +249,7 @@ def main() -> None:
             if decision == "unknown":
                 _reply(
                     f"⚠️ 判定できませんでした: `{request_id}`\n"
-                    f"スレッドで「OK/NG」「進めて/やめて」など意図が分かる形で返信してください。"
+                    f"スレッドで「OK/NG」など意図が分かる形で返信してください。"
                 )
                 return
 
@@ -268,7 +291,7 @@ def main() -> None:
                 log.exception("Error processing approval text for %s", request_id)
                 _reply(f"⚠️ 承認処理中にエラーが発生しました (request_id: {request_id})")
 
-        def on_message(
+        def handle_message(
             text: str,
             user_id: str,
             channel: str | None = None,
@@ -290,6 +313,57 @@ def main() -> None:
                 slack_thread_context=thread_context,
             )
 
+        def on_reaction(request_id: str, result: str, user_id: str) -> None:
+            enqueue(
+                "reaction",
+                {"request_id": request_id, "result": result, "user_id": user_id},
+                PRIORITY_CREATOR,
+            )
+
+        def on_approval_text(
+            request_id: str,
+            text: str,
+            user_id: str,
+            channel: str | None = None,
+            thread_ts: str | None = None,
+            thread_context: str | None = None,
+        ) -> None:
+            nonlocal last_creator_activity_at
+            last_creator_activity_at = time.monotonic()
+            enqueue(
+                "approval_text",
+                {
+                    "request_id": request_id,
+                    "text": text,
+                    "user_id": user_id,
+                    "channel": channel,
+                    "thread_ts": thread_ts,
+                    "thread_context": thread_context,
+                },
+                PRIORITY_CREATOR,
+            )
+
+        def on_message(
+            text: str,
+            user_id: str,
+            channel: str | None = None,
+            thread_ts: str | None = None,
+            thread_context: str | None = None,
+        ) -> None:
+            nonlocal last_creator_activity_at
+            last_creator_activity_at = time.monotonic()
+            enqueue(
+                "message",
+                {
+                    "text": text,
+                    "user_id": user_id,
+                    "channel": channel,
+                    "thread_ts": thread_ts,
+                    "thread_context": thread_context,
+                },
+                PRIORITY_CREATOR,
+            )
+
         approval_store_path = BASE_DIR / "companies" / COMPANY_ID / "state" / "slack_approval_mapping.json"
 
         slack = SlackBot(
@@ -307,9 +381,82 @@ def main() -> None:
 
         # Send startup notification
         slack.send_message("🟢 AI Company Manager 起動完了")
+
+        # Autonomous loop (CEO decides next action periodically)
+        mgr.autonomous_loop = AutonomousLoop(mgr)
+
+        def worker_loop() -> None:
+            log.info("Job worker started")
+            while not _shutdown:
+                try:
+                    _prio, _seq, kind, payload = job_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+
+                try:
+                    if kind == "reaction":
+                        handle_reaction(payload["request_id"], payload["result"], payload["user_id"])
+                    elif kind == "approval_text":
+                        handle_approval_text(
+                            payload["request_id"],
+                            payload["text"],
+                            payload["user_id"],
+                            channel=payload.get("channel"),
+                            thread_ts=payload.get("thread_ts"),
+                            thread_context=payload.get("thread_context"),
+                        )
+                    elif kind == "message":
+                        handle_message(
+                            payload["text"],
+                            payload["user_id"],
+                            channel=payload.get("channel"),
+                            thread_ts=payload.get("thread_ts"),
+                            thread_context=payload.get("thread_context"),
+                        )
+                    elif kind == "autonomous_tick":
+                        log.info("Autonomous tick start")
+                        try:
+                            mgr.autonomous_loop.tick()
+                        finally:
+                            autonomous_job_pending.clear()
+                    else:
+                        log.warning("Unknown job kind: %s", kind)
+                except Exception:
+                    log.exception("Error while processing job: %s", kind)
+                finally:
+                    job_queue.task_done()
+
+            log.info("Job worker stopped")
+
+        worker = threading.Thread(target=worker_loop, daemon=True, name="job-worker")
+        worker.start()
+
+        def autonomy_ticker() -> None:
+            if not AUTONOMOUS_ENABLED:
+                log.info("Autonomy disabled (AUTONOMOUS_ENABLED=0)")
+                return
+
+            last_tick = 0.0
+            log.info(
+                "Autonomy ticker enabled (interval=%ds, idle_grace=%ds)",
+                AUTONOMOUS_TICK_INTERVAL,
+                AUTONOMOUS_IDLE_GRACE_SECONDS,
+            )
+
+            while not _shutdown:
+                now = time.monotonic()
+                if now - last_tick >= AUTONOMOUS_TICK_INTERVAL:
+                    if now - last_creator_activity_at >= AUTONOMOUS_IDLE_GRACE_SECONDS:
+                        if not autonomous_job_pending.is_set():
+                            autonomous_job_pending.set()
+                            enqueue("autonomous_tick", {}, PRIORITY_AUTONOMY)
+                            last_tick = now
+                time.sleep(1)
+
+        ticker = threading.Thread(target=autonomy_ticker, daemon=True, name="autonomy-ticker")
+        ticker.start()
     else:
         log.warning("SLACK_BOT_TOKEN or SLACK_APP_TOKEN not set – running without Slack")
-
     # --- Main loop ---
     last_report_at = time.monotonic()
     last_daily_brief_at = time.monotonic()

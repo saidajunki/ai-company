@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -69,6 +70,8 @@ class AutonomousLoop:
 
     def __init__(self, manager: Manager) -> None:
         self.manager = manager
+        self._last_budget_notice_at = 0.0
+        self._last_budget_notice_at = 0.0
 
     def tick(self) -> None:
         """1サイクル分の自律実行を行う.
@@ -111,6 +114,7 @@ class AutonomousLoop:
             # 2. Budget check
             if self.manager.check_budget():
                 logger.info("Budget exceeded, skipping tick")
+                self._report_budget_exceeded()
                 return
 
             # 3. Pick task
@@ -370,6 +374,8 @@ class AutonomousLoop:
 
         system_content = (
             "あなたはAI会社の社長AIです。タスクを実行してください。\n"
+            "自律実行の開始時は、まず<reply>で『何をする/なぜ/誰に任せるか』を2〜5文で短く書いてから作業に入ってください（箇条書き禁止）。\n"
+            "原則として実装・調査・作業は社員AIに<delegate>し、あなたは目的・制約・レビューに集中してください。\n"
             "シェルコマンドが必要な場合は<shell>コマンド</shell>で指示してください。\n"
             "ブロッカー時は順に: ①社内SoT確認 ②Web一次情報を調査 ③必要なら高性能モデル社員AIへ<delegate>（例 model=openai/gpt-4.1）してください。\n"
             "それでも未解決、または方向性/予算/法務など高リスク判断が必要な場合のみ<consult>してください。<consult>には試行内容と判断論点を必ず含めてください。\n"
@@ -858,6 +864,14 @@ class AutonomousLoop:
             self.manager._slack_send(message, channel=channel, thread_ts=thread_ts)
         except Exception:
             logger.warning("Failed to send report: %s", message, exc_info=True)
+
+    def _report_budget_exceeded(self) -> None:
+        """Notify Creator (throttled) when autonomy is paused due to budget."""
+        now = time.monotonic()
+        if now - self._last_budget_notice_at < 3600:
+            return
+        self._last_budget_notice_at = now
+        self._report("LLM予算上限に達したため、自律実行を一時休止しています。必要なら予算設定を更新してください。")
 
     def _reap_stuck_tasks(self) -> None:
         """updated_atから一定時間経過したrunningタスクをfailedにする."""

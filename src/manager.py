@@ -310,8 +310,37 @@ class Manager:
     # ------------------------------------------------------------------
 
     def check_budget(self) -> bool:
-        """Budget management is disabled in minimal mode."""
-        return False
+        """Return True when the sliding-window LLM budget is exceeded."""
+        now = datetime.now(timezone.utc)
+
+        limit = DEFAULT_BUDGET_LIMIT_USD
+        window = DEFAULT_WINDOW_MINUTES
+        try:
+            if self.state.constitution and self.state.constitution.budget:
+                limit = float(self.state.constitution.budget.limit_usd)
+                window = int(self.state.constitution.budget.window_minutes)
+        except Exception:
+            pass
+
+        # Optional env overrides
+        try:
+            if os.environ.get("BUDGET_LIMIT_USD"):
+                limit = float(os.environ["BUDGET_LIMIT_USD"])
+            if os.environ.get("BUDGET_WINDOW_MINUTES"):
+                window = int(os.environ["BUDGET_WINDOW_MINUTES"])
+        except Exception:
+            logger.warning("Invalid budget env vars; ignoring", exc_info=True)
+
+        try:
+            return is_budget_exceeded(
+                self.state.ledger_events,
+                now,
+                limit_usd=limit,
+                window_minutes=window,
+            )
+        except Exception:
+            logger.warning("Budget check failed; treating as not exceeded", exc_info=True)
+            return False
 
     def refresh_pricing_cache(self, *, api_key: str | None = None, force: bool = False) -> None:
         """Refresh OpenRouter pricing cache (best-effort)."""
@@ -339,9 +368,38 @@ class Manager:
         agent_id: str = "manager",
         task_id: str = "",
     ) -> LedgerEvent:
-        """LLM cost/ledger tracking is disabled in minimal mode."""
+        """Record an LLM call as a ledger event with estimated cost."""
         now = datetime.now(timezone.utc)
-        return LedgerEvent(
+
+        # Best-effort pricing refresh (missing cache/model)
+        auto_refresh = os.environ.get("OPENROUTER_PRICING_AUTO_REFRESH", "1").strip().lower() not in (
+            "0", "false", "off", "no"
+        )
+        prev_cache = self.pricing_cache
+        try:
+            missing = (self.pricing_cache is None) or (model not in (self.pricing_cache.models or {}))
+        except Exception:
+            missing = True
+
+        if auto_refresh and missing and model not in self._pricing_refresh_attempted_models:
+            self._pricing_refresh_attempted_models.add(model)
+            try:
+                api_key = self._pricing_api_key or os.environ.get("OPENROUTER_API_KEY") or None
+                self.refresh_pricing_cache(api_key=api_key)
+            except Exception:
+                logger.warning("Failed to refresh pricing cache", exc_info=True)
+
+        pricing, source = get_pricing_with_fallback(
+            self.pricing_cache,
+            model,
+            previous_cache=prev_cache,
+        )
+
+        in_price = float(pricing.input_price_per_1k)
+        out_price = float(pricing.output_price_per_1k)
+        estimated = (input_tokens / 1000.0) * in_price + (output_tokens / 1000.0) * out_price
+
+        event = LedgerEvent(
             timestamp=now,
             event_type="llm_call",
             agent_id=agent_id,
@@ -350,11 +408,24 @@ class Manager:
             model=model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            unit_price_usd_per_1k_input_tokens=0.0,
-            unit_price_usd_per_1k_output_tokens=0.0,
-            price_retrieved_at=now,
-            estimated_cost_usd=0.0,
+            unit_price_usd_per_1k_input_tokens=in_price,
+            unit_price_usd_per_1k_output_tokens=out_price,
+            price_retrieved_at=pricing.retrieved_at,
+            estimated_cost_usd=estimated,
+            metadata={"pricing_source": source},
         )
+
+        try:
+            append_ledger_event(self.base_dir, self.company_id, event)
+        except Exception:
+            logger.warning("Failed to append ledger event", exc_info=True)
+
+        try:
+            self.state.ledger_events.append(event)
+        except Exception:
+            logger.warning("Failed to update in-memory ledger", exc_info=True)
+
+        return event
 
     # ------------------------------------------------------------------
     # Report generation (Req 3.1, 3.5, 7.6)
@@ -956,6 +1027,26 @@ class Manager:
             if self.llm_client is None:
                 logger.error("LLM client not configured")
                 self._slack_send("エラー: LLMクライアントが設定されていません")
+                return
+
+            # Budget guard (Creator/Autonomy共通)
+            if self.check_budget():
+                limit = DEFAULT_BUDGET_LIMIT_USD
+                window = DEFAULT_WINDOW_MINUTES
+                try:
+                    if self.state.constitution and self.state.constitution.budget:
+                        limit = float(self.state.constitution.budget.limit_usd)
+                        window = int(self.state.constitution.budget.window_minutes)
+                except Exception:
+                    pass
+                spent = compute_window_cost(
+                    self.state.ledger_events,
+                    datetime.now(timezone.utc),
+                    window_minutes=window,
+                )
+                self._slack_send(
+                    f"直近{window}分のLLMコストが上限に達したため、いまは処理を止めています（${spent:.2f}/${limit:.2f}）。"
+                )
                 return
 
             # 2. コンテキスト構築
