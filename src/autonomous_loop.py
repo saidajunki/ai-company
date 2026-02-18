@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from artifact_verifier import ArtifactVerifier
 from consultation_policy import assess_creator_consultation, should_escalate_task_failure
 from context_builder import TaskHistoryContext
+from cost_aggregator import compute_window_cost
 from llm_client import LLMError
 from models import TaskEntry, ResearchNote
 from priority_classifier import PriorityClassifier
@@ -48,6 +49,11 @@ MAX_TASK_WALL_SECONDS = _read_int_env("AUTONOMOUS_MAX_WALL_SECONDS", 0)
 MAX_PENDING_CONSULTATIONS = 5
 # runningタスクがこの秒数以上updated_atから経過したらstuckとみなす
 STUCK_TASK_TIMEOUT_SECONDS = 1800  # 30分
+PORTFOLIO_REVIEW_INTERVAL_SECONDS = _read_int_env("AUTONOMOUS_PORTFOLIO_REVIEW_INTERVAL", 300)
+PORTFOLIO_ALERT_COOLDOWN_SECONDS = _read_int_env("AUTONOMOUS_PORTFOLIO_ALERT_COOLDOWN_SECONDS", 1800)
+STALE_PENDING_TASK_SECONDS = _read_int_env("AUTONOMOUS_STALE_PENDING_SECONDS", 3600)
+STALE_PAUSED_TASK_SECONDS = _read_int_env("AUTONOMOUS_STALE_PAUSED_SECONDS", 7200)
+DORMANT_INITIATIVE_SECONDS = _read_int_env("AUTONOMOUS_DORMANT_INITIATIVE_SECONDS", 21600)
 
 
 class AutonomousLoop:
@@ -85,7 +91,8 @@ class AutonomousLoop:
     def __init__(self, manager: Manager) -> None:
         self.manager = manager
         self._last_budget_notice_at = 0.0
-        self._last_budget_notice_at = 0.0
+        self._last_portfolio_review_at = 0.0
+        self._last_portfolio_alert_at = 0.0
 
     def tick(self) -> None:
         """1サイクル分の自律実行を行う.
@@ -118,6 +125,9 @@ class AutonomousLoop:
             # 0b. Retry failed tasks
             self._retry_failed_tasks()
 
+            # 0c. Portfolio health check (stagnation / ownership / cost awareness)
+            self._review_portfolio_health()
+
             # 1. WIP check
             running = self.manager.task_queue.list_by_status("running")
             wip_limit = self._get_wip_limit()
@@ -148,6 +158,168 @@ class AutonomousLoop:
 
         except Exception:
             logger.exception("Error in autonomous loop tick")
+
+    @staticmethod
+    def _elapsed_seconds(ts: datetime, now: datetime) -> float:
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return max(0.0, (now - ts).total_seconds())
+
+    @staticmethod
+    def _shorten(text: str, limit: int = 80) -> str:
+        s = (text or "").strip().replace("\n", " ")
+        if len(s) <= limit:
+            return s
+        return s[:limit] + "…"
+
+    def _add_portfolio_followup(
+        self,
+        *,
+        description: str,
+        active_descriptions: set[str],
+    ) -> bool:
+        if description in active_descriptions:
+            return False
+        self.manager.task_queue.add(description, priority=1, source="autonomous")
+        active_descriptions.add(description)
+        return True
+
+    def _budget_snapshot(self, now: datetime) -> tuple[float, float, int]:
+        limit = 10.0
+        window = 60
+        try:
+            constitution = self.manager.state.constitution
+            if constitution and constitution.budget:
+                limit = float(constitution.budget.limit_usd)
+                window = int(constitution.budget.window_minutes)
+        except Exception:
+            pass
+        try:
+            spent = compute_window_cost(
+                self.manager.state.ledger_events,
+                now,
+                window_minutes=window,
+            )
+        except Exception:
+            spent = 0.0
+        return spent, limit, window
+
+    def _review_portfolio_health(self) -> None:
+        now_mono = time.monotonic()
+        if now_mono - self._last_portfolio_review_at < PORTFOLIO_REVIEW_INTERVAL_SECONDS:
+            return
+        self._last_portfolio_review_at = now_mono
+
+        now = datetime.now(timezone.utc)
+        all_tasks = self.manager.task_queue.list_all()
+        pending_tasks = [t for t in all_tasks if t.status == "pending"]
+        paused_tasks = [t for t in all_tasks if t.status == "paused"]
+
+        stale_pending = [
+            t for t in pending_tasks
+            if self._elapsed_seconds(t.updated_at, now) >= STALE_PENDING_TASK_SECONDS
+        ]
+        stale_paused = [
+            t for t in paused_tasks
+            if self._elapsed_seconds(t.updated_at, now) >= STALE_PAUSED_TASK_SECONDS
+        ]
+
+        initiatives = []
+        initiative_store = getattr(self.manager, "initiative_store", None)
+        if initiative_store is not None:
+            try:
+                initiatives.extend(initiative_store.list_by_status("planned"))
+                initiatives.extend(initiative_store.list_by_status("in_progress"))
+                initiatives.extend(initiative_store.list_by_status("paused"))
+            except Exception:
+                logger.warning("Failed to load initiatives for portfolio review", exc_info=True)
+                initiatives = []
+        dormant_initiatives = [
+            ini for ini in initiatives
+            if self._elapsed_seconds(ini.updated_at, now) >= DORMANT_INITIATIVE_SECONDS
+        ]
+
+        stale_pending.sort(key=lambda t: self._elapsed_seconds(t.updated_at, now), reverse=True)
+        stale_paused.sort(key=lambda t: self._elapsed_seconds(t.updated_at, now), reverse=True)
+        dormant_initiatives.sort(
+            key=lambda ini: self._elapsed_seconds(ini.updated_at, now),
+            reverse=True,
+        )
+
+        active_descriptions = {
+            (t.description or "").strip()
+            for t in all_tasks
+            if t.status in ("pending", "running", "paused", "canceled")
+        }
+
+        findings: list[str] = []
+        created_count = 0
+
+        for task in stale_pending[:3]:
+            elapsed = int(self._elapsed_seconds(task.updated_at, now) / 60)
+            findings.append(
+                f"- pending停滞 [{task.task_id}] {self._shorten(task.description)} ({elapsed}分)"
+            )
+            desc = (
+                f"[portfolio:{task.task_id}] 停滞タスクの原因とボール保有者を特定し再始動する: "
+                f"{self._shorten(task.description, 60)}"
+            )
+            if self._add_portfolio_followup(description=desc, active_descriptions=active_descriptions):
+                created_count += 1
+
+        for task in stale_paused[:3]:
+            elapsed = int(self._elapsed_seconds(task.updated_at, now) / 60)
+            findings.append(
+                f"- paused停滞 [{task.task_id}] {self._shorten(task.description)} ({elapsed}分)"
+            )
+            desc = (
+                f"[portfolio:{task.task_id}] paused案件を再開/停止判断し、必要ならCreatorへ相談する: "
+                f"{self._shorten(task.description, 60)}"
+            )
+            if self._add_portfolio_followup(description=desc, active_descriptions=active_descriptions):
+                created_count += 1
+
+        for initiative in dormant_initiatives[:3]:
+            elapsed = int(self._elapsed_seconds(initiative.updated_at, now) / 3600)
+            findings.append(
+                f"- 休眠事業 [{initiative.initiative_id}] {self._shorten(initiative.title)} ({elapsed}時間)"
+            )
+            desc = (
+                f"[initiative:{initiative.initiative_id}] 休眠事業の継続/停止/ピボットを判断し、"
+                "方針または予算変更が必要ならCreatorへ相談する"
+            )
+            if self._add_portfolio_followup(description=desc, active_descriptions=active_descriptions):
+                created_count += 1
+
+        if not findings:
+            return
+
+        try:
+            pending_consultations = self.manager.consultation_store.list_by_status("pending")
+        except Exception:
+            pending_consultations = []
+
+        if pending_consultations:
+            ball_owner = f"Creator（未解決consult {len(pending_consultations)}件）"
+        elif stale_paused:
+            ball_owner = "CEO/社員AI（再開判断待ち）"
+        elif stale_pending:
+            ball_owner = "CEO（未着手タスク滞留）"
+        else:
+            ball_owner = "CEO（休眠事業の継続判断待ち）"
+
+        spent, limit, window = self._budget_snapshot(now)
+        if now_mono - self._last_portfolio_alert_at < PORTFOLIO_ALERT_COOLDOWN_SECONDS:
+            return
+        self._last_portfolio_alert_at = now_mono
+        self._report(
+            "📌 事業ポートフォリオ点検\n"
+            f"- ボール保有者: {ball_owner}\n"
+            f"- 予算使用: ${spent:.2f}/${limit:.2f} (直近{window}分)\n"
+            f"- 新規フォローアップ: {created_count}件\n"
+            "検知内容:\n"
+            + "\n".join(findings)
+        )
 
     def _pick_task(self) -> TaskEntry | None:
         """次に実行するタスクを選択する."""

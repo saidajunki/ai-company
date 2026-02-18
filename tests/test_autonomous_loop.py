@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,7 +11,8 @@ import pytest
 from autonomous_loop import AutonomousLoop, DEFAULT_WIP_LIMIT
 from llm_client import LLMError, LLMResponse
 from manager import Manager, init_company_directory
-from models import TaskEntry
+from models import InitiativeEntry, TaskEntry
+from ndjson_store import ndjson_append
 from task_queue import TaskQueue
 from vision_loader import VisionLoader
 
@@ -166,6 +167,97 @@ class TestTickExecutesPending:
         # Task should be failed
         failed = mgr.task_queue.list_by_status("failed")
         assert len(failed) == 1
+
+
+# ---------------------------------------------------------------------------
+# tick() — portfolio interest review (stagnation / dormant initiatives)
+# ---------------------------------------------------------------------------
+
+class TestPortfolioInterestReview:
+    def test_tick_adds_followup_for_stale_pending_task(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        loop = AutonomousLoop(mgr)
+
+        task = mgr.task_queue.add("長時間止まっている実装タスク")
+        stale_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        stale_entry = task.model_copy(update={"updated_at": stale_at, "created_at": stale_at})
+        ndjson_append(mgr.task_queue._path, stale_entry)
+
+        with patch.object(mgr, "check_budget", return_value=False), patch.object(loop, "_execute_task"):
+            loop.tick()
+
+        pending = mgr.task_queue.list_by_status("pending")
+        assert any(
+            t.description.startswith(f"[portfolio:{task.task_id}]")
+            for t in pending
+        )
+
+    def test_tick_adds_followup_for_dormant_initiative(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        loop = AutonomousLoop(mgr)
+
+        now = datetime.now(timezone.utc)
+        initiative = InitiativeEntry(
+            initiative_id="ini-dormant",
+            title="放置された新規事業",
+            description="長く更新されていない",
+            status="in_progress",
+            created_at=now - timedelta(days=2),
+            updated_at=now - timedelta(days=1),
+        )
+        mgr.initiative_store.save(initiative)
+
+        with patch.object(mgr, "check_budget", return_value=False), patch.object(loop, "_execute_task"):
+            loop.tick()
+
+        pending = mgr.task_queue.list_by_status("pending")
+        assert any(
+            t.description.startswith("[initiative:ini-dormant]")
+            for t in pending
+        )
+
+    def test_portfolio_alert_reports_ball_owner_and_cost(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        loop = AutonomousLoop(mgr)
+
+        task = mgr.task_queue.add("停滞タスク")
+        stale_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        stale_entry = task.model_copy(update={"updated_at": stale_at, "created_at": stale_at})
+        ndjson_append(mgr.task_queue._path, stale_entry)
+        mgr.consultation_store.ensure_pending("確認したい方針衝突", related_task_id=task.task_id)
+
+        with patch.object(mgr, "check_budget", return_value=False), patch.object(loop, "_execute_task"):
+            loop.tick()
+
+        sent_texts = []
+        for call in mgr.slack.send_message.call_args_list:
+            if call.args:
+                sent_texts.append(str(call.args[0]))
+                continue
+            sent_texts.append(str(call.kwargs.get("text", "")))
+        assert any("事業ポートフォリオ点検" in txt for txt in sent_texts)
+        assert any("ボール保有者: Creator" in txt for txt in sent_texts)
+        assert any("予算使用:" in txt for txt in sent_texts)
+
+    def test_portfolio_followup_not_duplicated_when_active_exists(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        loop = AutonomousLoop(mgr)
+
+        task = mgr.task_queue.add("同じ停滞案件")
+        stale_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        stale_entry = task.model_copy(update={"updated_at": stale_at, "created_at": stale_at})
+        ndjson_append(mgr.task_queue._path, stale_entry)
+
+        with patch.object(mgr, "check_budget", return_value=False), patch.object(loop, "_execute_task"):
+            loop.tick()
+
+        loop._last_portfolio_review_at = 0.0
+        with patch.object(mgr, "check_budget", return_value=False), patch.object(loop, "_execute_task"):
+            loop.tick()
+
+        pending = mgr.task_queue.list_by_status("pending")
+        matches = [t for t in pending if t.description.startswith(f"[portfolio:{task.task_id}]")]
+        assert len(matches) == 1
 
 
 # ---------------------------------------------------------------------------
