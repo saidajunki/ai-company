@@ -1053,12 +1053,20 @@ class AutonomousLoop:
         if task.parent_task_id is None:
             return
         try:
+            parent = None
+            try:
+                parent = self.manager.task_queue._get_latest(task.parent_task_id)
+            except Exception:
+                parent = None
             siblings = self.manager.task_queue.list_by_parent(task.parent_task_id)
             # 全サブタスク完了なら親をcompletedに
             if all(s.status == "completed" for s in siblings):
                 self.manager.task_queue.update_status(
                     task.parent_task_id, "completed", result="全サブタスク完了"
                 )
+                if parent is not None:
+                    desc = (parent.description or "").replace("[親]", "").strip()
+                    self._report(f"一連の作業が完了しました: {desc or parent.task_id}", task=parent)
                 return
             # 永久失敗サブタスク（retry_count >= max_retries）があれば親をfailedに
             if any(
@@ -1068,6 +1076,9 @@ class AutonomousLoop:
                 self.manager.task_queue.update_status(
                     task.parent_task_id, "failed", error="サブタスク永久失敗"
                 )
+                if parent is not None:
+                    desc = (parent.description or "").replace("[親]", "").strip()
+                    self._report(f"一連の作業が失敗しました: {desc or parent.task_id}\n原因: サブタスク永久失敗", task=parent)
         except Exception:
             logger.exception(
                 "Error checking parent completion for task %s", task.task_id
