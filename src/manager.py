@@ -1889,11 +1889,41 @@ class Manager:
                     role = role.strip() or "worker"
                     desc = desc.strip() or content
 
+                    now = datetime.now(timezone.utc)
+                    spent = compute_window_cost(self.state.ledger_events, now)
+                    budget_limit = DEFAULT_BUDGET_LIMIT_USD
+                    if self.state.constitution and self.state.constitution.budget:
+                        budget_limit = self.state.constitution.budget.limit_usd
+                    budget_remaining = max(0.0, budget_limit - spent)
+
+                    creator_intent = ""
+                    for msg in conversation:
+                        if msg.get("role") == "user":
+                            creator_intent = (msg.get("content") or "").strip()
+                            if creator_intent:
+                                break
+
+                    delegation_brief = "\n".join([
+                        "【CEO委任ブリーフ】",
+                        "- 分業原則: CEOは目的/制約を定義し、実装のHowは社員AIが決める。",
+                        f"- role: {role}",
+                        f"- task_id: {task_id}",
+                        f"- 予算残: ${budget_remaining:.2f} (limit=${budget_limit:.2f})",
+                        "- 期待: 目的達成に必要な具体手順を自律的に設計・実行し、証跡付きで報告する。",
+                        "- エスカレーション: 方針矛盾/高リスク/予算超過見込み時は報告する。",
+                        "",
+                        "【Creator意図(要約元)】",
+                        (creator_intent[:500] or "(なし)"),
+                        "",
+                        "【依頼本文】",
+                        desc,
+                    ])
+
                     try:
                         result = self.sub_agent_runner.spawn(
                             name=role,
                             role=role,
-                            task_description=desc,
+                            task_description=delegation_brief,
                             model=action.model,
                         )
                         result_text = f"サブエージェント結果 (role={role}):\n{result}"

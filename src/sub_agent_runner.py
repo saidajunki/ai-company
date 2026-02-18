@@ -9,6 +9,7 @@ Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -28,6 +29,120 @@ logger = logging.getLogger(__name__)
 
 MAX_CONVERSATION_TURNS = 10
 DEFAULT_WIP_LIMIT = 3
+
+
+@dataclass(frozen=True)
+class RoleObjective:
+    """Role-specific objective function and boundaries."""
+
+    objective: str
+    success_metrics: list[str]
+    owned_decisions: list[str]
+    escalation_conditions: list[str]
+
+
+def _resolve_role_objective(role: str) -> RoleObjective:
+    """Return objective profile for a sub-agent role."""
+    normalized = (role or "").strip().lower()
+
+    if any(k in normalized for k in ("infra", "sre", "ops", "運用", "インフラ")):
+        return RoleObjective(
+            objective="可用性・安全性・再現性を優先して運用基盤を安定化する",
+            success_metrics=[
+                "障害復旧時間を短縮する",
+                "設定変更に証跡とロールバック手順を残す",
+                "運用手順を再実行可能な形で文書化する",
+            ],
+            owned_decisions=[
+                "サービス構成・設定値・起動順序の最適化",
+                "監視/ログ/復旧コマンドの具体化",
+                "デプロイ/再起動/切り戻し手順の設計",
+            ],
+            escalation_conditions=[
+                "予算増額や有料契約が必要",
+                "会社方針や公開範囲に抵触する可能性",
+                "データ損失リスクが高い不可逆操作",
+            ],
+        )
+
+    if any(k in normalized for k in ("dev", "coder", "engineer", "開発", "実装", "web")):
+        return RoleObjective(
+            objective="CEOが定めた目的・期限・予算内で、実装品質と速度を最大化する",
+            success_metrics=[
+                "要求仕様に一致した動作を実現する",
+                "最小変更で安全にリリース可能にする",
+                "検証可能な成果と再現コマンドを残す",
+            ],
+            owned_decisions=[
+                "技術選定・実装方法・詳細設計",
+                "デバッグ方針・テスト方針・リファクタリング範囲",
+                "実装手順の分解と実行順",
+            ],
+            escalation_conditions=[
+                "要件が矛盾して実装方針を確定できない",
+                "予算/期限を超過しそう",
+                "セキュリティ・法務リスクが高い",
+            ],
+        )
+
+    if any(k in normalized for k in ("finance", "budget", "予算", "会計", "財務")):
+        return RoleObjective(
+            objective="コスト効率を最大化しつつ、事業継続性を守る",
+            success_metrics=[
+                "予算超過リスクを早期検知する",
+                "支出判断の根拠を定量で提示する",
+                "代替案の費用対効果を比較提示する",
+            ],
+            owned_decisions=[
+                "費用試算・コスト配分・削減案の設計",
+                "モデル/サービスの費用最適化",
+                "予算執行の優先順位提案",
+            ],
+            escalation_conditions=[
+                "予算上限の変更が必要",
+                "新規課金・契約を伴う",
+                "会社方針に関わる投資判断",
+            ],
+        )
+
+    if any(k in normalized for k in ("research", "analyst", "調査", "分析", "戦略")):
+        return RoleObjective(
+            objective="意思決定に使える情報の精度と鮮度を最大化する",
+            success_metrics=[
+                "一次情報に基づく根拠を提示する",
+                "不確実性と前提条件を明示する",
+                "意思決定可能な比較案に整理する",
+            ],
+            owned_decisions=[
+                "調査範囲・検索手順・要約粒度",
+                "情報の信頼性評価と取捨選択",
+                "提案オプションの整理方法",
+            ],
+            escalation_conditions=[
+                "外部発信や対外約束に直結する結論",
+                "方針矛盾があり優先順位を決められない",
+                "追加予算なしでは検証不能",
+            ],
+        )
+
+    return RoleObjective(
+        objective="担当タスクを最短で前進させ、CEOの意思決定負荷を減らす",
+        success_metrics=[
+            "作業を中断させない具体的進捗を出す",
+            "結果と根拠を簡潔に共有する",
+            "再利用可能な知見を残す",
+        ],
+        owned_decisions=[
+            "タスク実行順と具体手段",
+            "必要な調査/実装/検証の設計",
+            "ログ・証跡の取り方",
+        ],
+        escalation_conditions=[
+            "予算/方針/期限の制約を満たせない",
+            "不可逆で高リスクな操作が必要",
+            "要件の優先順位が不明確",
+        ],
+    )
 
 
 class SubAgentRunner:
@@ -194,11 +309,26 @@ class SubAgentRunner:
         company_root = self.manager.base_dir / "companies" / self.manager.company_id
         purpose_text = (purpose or "").strip() or "未設定"
         vision = (vision_text or "").strip() or "未設定"
+        objective = _resolve_role_objective(role)
 
         lines: list[str] = [
             "あなたはAI会社のサブエージェントです。",
             f"役割: {role}",
             f"タスク: {task_description}",
+            "",
+            "## この役割の目的関数",
+            f"- {objective.objective}",
+            "成功指標:",
+            *[f"- {metric}" for metric in objective.success_metrics],
+            "",
+            "あなたが主体的に決める範囲:",
+            *[f"- {item}" for item in objective.owned_decisions],
+            "",
+            "Creator/CEOに確認すべき条件:",
+            *[f"- {item}" for item in objective.escalation_conditions],
+            "",
+            "CEOは目的・予算・期限・価値観を定義し、あなたは実装/運用のHowを決める担当です。",
+            "専門実務の詳細をCEOに戻さず、まず自分で具体案を作って実行してください。",
             "",
             "## 会社の目的",
             purpose_text,
