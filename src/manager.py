@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1132,6 +1133,31 @@ class Manager:
                 {"role": "user", "content": text},
             ]
 
+            prefetch_urls: set[str] | None = None
+            if self._should_prefetch_web_search(stripped):
+                self._trace_event("事前Web検索を実行（最新/期間指定の外部情報）")
+                self._activity_log(
+                    f"CEOツール利用: web_search (prefetch: {self._summarize_for_activity_log(stripped, limit=120)})"
+                )
+                pre_results = self.web_searcher.search(stripped)
+                prefetch_urls = {self._normalize_url(sr.url) for sr in pre_results}
+
+                if pre_results:
+                    guard = (
+                        "重要: あなたは次の事前リサーチ結果に含まれるURL以外を、返信の出典として提示してはいけません。"
+                        "URLを捏造しないでください。足りない場合は『見つからない』と答えるか、<research>で追加調査してください。"
+                    )
+                    conversation.insert(1, {"role": "system", "content": guard})
+                    summary_parts = [f"事前リサーチ結果 (query={stripped}):"]
+                    for i, sr in enumerate(pre_results, 1):
+                        summary_parts.append(f"{i}. {sr.title}\n   {sr.url}\n   {sr.snippet}")
+                    conversation.append({"role": "user", "content": "\n".join(summary_parts)})
+                else:
+                    guard = (
+                        "重要: 事前リサーチ結果は空でした。URLを捏造せず『見つからない』と答えるか、<research>で別クエリ検索してください。"
+                    )
+                    conversation.insert(1, {"role": "system", "content": guard})
+
             # 3. LLM呼び出し
             model_name = getattr(self.llm_client, "model", "unknown")
             self._trace_event(f"LLM推論を開始 (model={model_name})")
@@ -1159,6 +1185,36 @@ class Manager:
 
             # 5. 応答パース
             actions = parse_response(llm_result.content)
+
+            # Anti-hallucination guard: if we prefetched, block fabricated URLs in replies (best-effort)
+            if prefetch_urls is not None:
+                has_research = any(a.action_type == "research" for a in actions)
+                if not has_research:
+                    reply_text = "\n".join([a.content for a in actions if a.action_type == "reply"])
+                    reply_urls = {self._normalize_url(u) for u in self._extract_http_urls(reply_text)}
+                    invalid = [u for u in reply_urls if u and u not in prefetch_urls]
+                    if invalid and self.llm_client is not None:
+                        conversation.append({
+                            "role": "user",
+                            "content": (
+                                "注意: 返信に含まれるURLが事前リサーチ結果に存在しません（URL捏造の疑い）。\n"
+                                f"- invalid_url: {invalid[0]}\n"
+                                "リサーチ結果に含まれるURLだけで回答し直してください。見つからなければ『見つからない』と明言してください。"
+                            ),
+                        })
+                        llm_result = self.llm_client.chat(conversation)
+                        if isinstance(llm_result, LLMError):
+                            logger.error("LLM retry (url-guard) failed: %s", llm_result.message)
+                            self._slack_send(f"エラー: LLM呼び出しに失敗しました — {llm_result.message}")
+                            return
+                        self.record_llm_call(
+                            provider="openrouter",
+                            model=llm_result.model,
+                            input_tokens=llm_result.input_tokens,
+                            output_tokens=llm_result.output_tokens,
+                            task_id=task_id,
+                        )
+                        actions = parse_response(llm_result.content)
             if actions:
                 action_list = ", ".join(a.action_type for a in actions)
                 self._trace_event(f"実行アクションを決定: {action_list}")
@@ -2293,6 +2349,56 @@ class Manager:
         has_target = any(k in normalized for k in ("最大会話ターン数", "最大ターン数", "max_task_turns", "maxturn"))
         has_question = any(k in normalized for k in ("何", "いくつ", "教えて", "確認", "設定", "値", "なっていますか", "ですか"))
         return has_target and has_question
+
+
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        u = (url or "").strip()
+        u = u.rstrip(")]}>.,'、。")
+        if u.startswith("http://"):
+            u = "https://" + u[len("http://"):]
+        if u.endswith("/"):
+            u = u[:-1]
+        return u
+
+    @staticmethod
+    def _extract_http_urls(text: str) -> list[str]:
+        if not text:
+            return []
+        return re.findall(r"https?://[^\s)\]}>\"']+", text)
+
+    @staticmethod
+    def _should_prefetch_web_search(text: str) -> bool:
+        # Heuristic: prefetch web search for time-sensitive external questions.
+        s = (text or "").strip()
+        if not s:
+            return False
+        lowered = s.lower()
+
+        internal_markers = (
+            "vps",
+            "traefik",
+            "docker",
+            "compose",
+            "system prompt",
+            "システムプロンプト",
+            "ロジック",
+            "どのファイル",
+            "最大会話ターン数",
+            "max_task_turns",
+            "社員ai",
+            "社員 ai",
+            "エージェント",
+        )
+        if any(m in lowered for m in internal_markers):
+            return False
+
+        if re.search(r"\b20(2[5-9]|[3-9]\d)\b", lowered):
+            return True
+        if any(k in s for k in ("最新", "最近", "ニュース", "リリース", "発表", "バージョン")):
+            return True
+        return False
 
     def _read_max_task_turns_from_source(self) -> tuple[int | None, str]:
         import re
