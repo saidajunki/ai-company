@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_WIP_LIMIT = 3
-MAX_TASK_TURNS = 50
+MAX_TASK_TURNS = 100
 MAX_PENDING_CONSULTATIONS = 5
 # runningタスクがこの秒数以上updated_atから経過したらstuckとみなす
 STUCK_TASK_TIMEOUT_SECONDS = 1800  # 30分
