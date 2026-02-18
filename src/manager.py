@@ -910,6 +910,33 @@ class Manager:
             self._trace_event("依頼を受信。意図解析を開始")
             self._activity_log(f"Creator→CEO: {self._summarize_for_activity_log(stripped, limit=500)}")
 
+            if slack_channel and slack_thread_ts:
+                if slack_thread_context and slack_thread_context.strip():
+                    self._trace_event("Slackスレッド文脈を受領済み")
+                else:
+                    fetch_thread_context = getattr(self.slack, "fetch_thread_context", None)
+                    if callable(fetch_thread_context):
+                        self._trace_event("Slackスレッド文脈を取得中")
+                        try:
+                            fetched_context = fetch_thread_context(
+                                channel=slack_channel,
+                                thread_ts=slack_thread_ts,
+                                exclude_ts=None,
+                            )
+                            if fetched_context and fetched_context.strip():
+                                slack_thread_context = fetched_context
+                                self._trace_event("Slackスレッド文脈を取得完了")
+                            else:
+                                self._trace_event("Slackスレッド文脈は空でした")
+                        except Exception:
+                            logger.warning(
+                                "Failed to fetch thread context fallback (channel=%s, thread_ts=%s)",
+                                slack_channel,
+                                slack_thread_ts,
+                                exc_info=True,
+                            )
+                            self._trace_event("Slackスレッド文脈の取得に失敗")
+
             # Ingest policy/rule/budget memories from incoming conversation
             try:
                 ingest_result = self.policy_memory.ingest_text(

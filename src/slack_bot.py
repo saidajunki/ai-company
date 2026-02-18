@@ -196,6 +196,35 @@ class SlackBot:
             )
             return None
 
+
+    def fetch_thread_context(
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        exclude_ts: str | None = None,
+    ) -> str | None:
+        """Public helper to fetch thread context for Manager fallback usage."""
+        context = self._format_thread_context(
+            channel=channel,
+            thread_ts=thread_ts,
+            exclude_ts=exclude_ts,
+        )
+        if context and context.strip():
+            log.info(
+                "Thread context loaded (channel=%s thread_ts=%s chars=%d)",
+                channel,
+                thread_ts,
+                len(context),
+            )
+        else:
+            log.info(
+                "Thread context unavailable (channel=%s thread_ts=%s)",
+                channel,
+                thread_ts,
+            )
+        return context
+
     def _load_approval_mapping(self) -> None:
         """Load approval message mapping from disk (best-effort)."""
         if self._approval_store_path is None:
@@ -278,7 +307,7 @@ class SlackBot:
             log.info("Mention from %s: %s", user_id, text[:80])
             thread_context = None
             if channel and thread_ts:
-                thread_context = self._format_thread_context(
+                thread_context = self.fetch_thread_context(
                     channel=channel,
                     thread_ts=thread_ts,
                     exclude_ts=event.get("ts") or None,
@@ -330,7 +359,7 @@ class SlackBot:
                 log.info("Approval reply detected for %s by %s", request_id, user_id)
                 thread_context = None
                 if channel and thread_ts:
-                    thread_context = self._format_thread_context(
+                    thread_context = self.fetch_thread_context(
                         channel=channel,
                         thread_ts=thread_ts,
                         exclude_ts=event.get("ts") or None,
@@ -348,7 +377,7 @@ class SlackBot:
             log.info("Message from %s: %s", user_id, text[:80])
             thread_context = None
             if channel and thread_ts:
-                thread_context = self._format_thread_context(
+                thread_context = self.fetch_thread_context(
                     channel=channel,
                     thread_ts=thread_ts,
                     exclude_ts=event.get("ts") or None,
