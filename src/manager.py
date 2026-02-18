@@ -1000,16 +1000,16 @@ class Manager:
                 return
 
             if self._is_max_turns_question(stripped):
-                self._trace_event("ソースコード確認中: /opt/apps/ai-company/src/autonomous_loop.py")
-                max_turns, source_path = self._read_max_task_turns_from_source()
-                if max_turns is None:
-                    self._slack_send("最大会話ターン数の設定値をコードから取得できませんでした。")
-                else:
-                    self._trace_event(f"設定値を確認: MAX_TASK_TURNS={max_turns}")
-                    self._slack_send(
-                        f"現在の最大会話ターン数は `{max_turns}` です。\n"
-                        f"定義箇所: `{source_path}`"
-                    )
+                limits = self._read_turn_limit_settings()
+                self._trace_event("設定値を確認: turn/time guards")
+                self._slack_send(
+                    "現在のターン/時間ガード設定は以下です。\n"
+                    f"- 社員AI SUB_AGENT_MAX_TURNS: `{limits['sub_agent_max_turns_text']}`\n"
+                    f"- 社員AI SUB_AGENT_MAX_WALL_SECONDS: `{limits['sub_agent_max_wall_text']}`\n"
+                    f"- 自律タスク AUTONOMOUS_MAX_TURNS: `{limits['autonomous_max_turns_text']}`\n"
+                    f"- 自律タスク AUTONOMOUS_MAX_WALL_SECONDS: `{limits['autonomous_max_wall_text']}`\n"
+                    "0 は『上限なし』です。中断時は run_id 付き進捗レポートを返し、`employee resume <run_id>` で再開できます。"
+                )
                 return
 
             handled_control, control_reply = self._handle_runtime_control_command(
@@ -2411,6 +2411,8 @@ class Manager:
                             persistent_employee=employee.model_dump() if employee is not None else None,
                         )
                         result_text = f"サブエージェント結果 (role={role}):\n{result}"
+                        if result.lstrip().startswith("⚠️ 社員AI中断報告"):
+                            self._slack_send(result)
                         if employee is not None:
                             self._activity_log(
                                 f"社員AI→CEO 報告: employee={employee.name}({employee.employee_id}) role={role} "
@@ -2785,6 +2787,64 @@ class Manager:
         if not cmd:
             return False, ""
 
+        m = re.match(r"^employee\s+resume\s+([A-Za-z0-9_-]+)\s*$", cmd, re.IGNORECASE)
+        if m:
+            run_id = m.group(1).strip()
+            checkpoint = self.sub_agent_runner.get_run_checkpoint(run_id)
+            if checkpoint is None:
+                return True, f"⚠️ 指定run_idのチェックポイントが見つかりません: {run_id}"
+
+            role = str(checkpoint.get("role") or "worker").strip() or "worker"
+            model = str(checkpoint.get("model") or (actor_model or "")).strip() or None
+            employee_id = str(checkpoint.get("employee_id") or "").strip()
+            employee = self.employee_store.get_by_id(employee_id) if employee_id else None
+
+            if employee is not None and employee.status != "active":
+                try:
+                    employee = self.employee_store.update_status(employee.employee_id, "active")
+                except Exception:
+                    logger.warning("Failed to activate employee for resume: %s", employee.employee_id, exc_info=True)
+
+            base_task = str(checkpoint.get("task_description") or "").strip() or "前回中断したタスクを再開する"
+            progress = checkpoint.get("progress") or []
+            if isinstance(progress, list):
+                progress_lines = [f"- {str(item)}" for item in progress[-8:] if str(item).strip()]
+            else:
+                progress_lines = []
+            if not progress_lines:
+                progress_lines = ["- 進捗ログなし"]
+
+            pending_hint = str(checkpoint.get("pending_hint") or "").strip() or "未完了作業を洗い出して継続"
+            task_description = "\n".join([
+                base_task,
+                "",
+                f"run_id={run_id} の中断点から再開してください。",
+                "実施済み:",
+                *progress_lines,
+                "再開要件:",
+                f"- {pending_hint}",
+                "- 重複実行を避け、未完了作業から再開する",
+                "- 完了時は結果と検証証跡を報告する",
+            ])
+
+            target_name = employee.name if employee is not None else role
+            target_budget = float(employee.budget_limit_usd) if employee is not None else 1.0
+            try:
+                result = self.sub_agent_runner.spawn(
+                    name=target_name,
+                    role=role,
+                    task_description=task_description,
+                    budget_limit_usd=target_budget,
+                    model=model,
+                    ignore_wip_limit=True,
+                    persistent_employee=employee.model_dump() if employee is not None else None,
+                )
+            except Exception as exc:
+                logger.warning("Failed to resume employee run: %s", run_id, exc_info=True)
+                return True, f"⚠️ run_id {run_id} の再開に失敗しました: {exc}"
+
+            return True, f"▶️ run_id {run_id} を再開しました。\n{result}"
+
         m = re.match(r"^employee\s+list(?:\s+(\d+))?\s*$", cmd, re.IGNORECASE)
         if m:
             limit = int(m.group(1) or 20)
@@ -2919,20 +2979,32 @@ class Manager:
             return True
         return False
 
-    def _read_max_task_turns_from_source(self) -> tuple[int | None, str]:
-        import re
+    def _read_turn_limit_settings(self) -> dict[str, str]:
+        def _as_int(env_key: str, fallback: int) -> int:
+            raw = (os.environ.get(env_key) or "").strip()
+            if not raw:
+                return fallback
+            try:
+                return int(raw)
+            except Exception:
+                return fallback
 
-        target = Path(os.environ.get("APP_REPO_PATH", "/opt/apps/ai-company")) / "src" / "autonomous_loop.py"
-        source_path = str(target)
-        try:
-            content = target.read_text(encoding="utf-8")
-        except Exception:
-            logger.warning("Failed to read max turns source: %s", source_path, exc_info=True)
-            return None, source_path
-        m = re.search(r"^MAX_TASK_TURNS\s*=\s*(\d+)\s*$", content, re.MULTILINE)
-        if not m:
-            return None, source_path
-        return int(m.group(1)), source_path
+        sub_turns = _as_int("SUB_AGENT_MAX_TURNS", 0)
+        sub_wall = _as_int("SUB_AGENT_MAX_WALL_SECONDS", 0)
+        auto_turns = _as_int("AUTONOMOUS_MAX_TURNS", 100)
+        auto_wall = _as_int("AUTONOMOUS_MAX_WALL_SECONDS", 0)
+
+        def _fmt(value: int, suffix: str = "") -> str:
+            if value <= 0:
+                return "0 (上限なし)"
+            return f"{value}{suffix}"
+
+        return {
+            "sub_agent_max_turns_text": _fmt(sub_turns),
+            "sub_agent_max_wall_text": _fmt(sub_wall, "秒"),
+            "autonomous_max_turns_text": _fmt(auto_turns),
+            "autonomous_max_wall_text": _fmt(auto_wall, "秒"),
+        }
 
     def _load_slack_context(self) -> None:
         """Load last known Slack context (best-effort) for autonomous reports."""

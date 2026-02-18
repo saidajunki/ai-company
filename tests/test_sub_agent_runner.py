@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -12,7 +13,7 @@ from agent_registry import AgentRegistry
 from llm_client import LLMClient, LLMError, LLMResponse
 from manager import Manager, init_company_directory
 from models import LedgerEvent
-from sub_agent_runner import SubAgentRunner, DEFAULT_WIP_LIMIT, MAX_CONVERSATION_TURNS
+from sub_agent_runner import SubAgentRunner, DEFAULT_WIP_LIMIT
 
 
 CID = "test-co"
@@ -358,9 +359,11 @@ class TestShellExecution:
 # ---------------------------------------------------------------------------
 
 class TestMaxTurns:
-    def test_stops_at_max_turns(self, tmp_path: Path):
+    def test_stops_at_max_turns(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         mgr = _make_manager(tmp_path)
         runner = SubAgentRunner(mgr)
+
+        monkeypatch.setenv("SUB_AGENT_MAX_TURNS", "4")
 
         mock_sub = _make_mock_llm()
         # Always return shell commands to keep looping
@@ -374,8 +377,34 @@ class TestMaxTurns:
         runner._create_llm_client = MagicMock(return_value=mock_sub)
 
         result = runner.spawn("Worker", "developer", "無限ループ")
-        assert "最大会話ターン数" in result
-        assert mock_sub.chat.call_count == MAX_CONVERSATION_TURNS
+        assert "社員AI中断報告" in result
+        assert "run_id:" in result
+        assert mock_sub.chat.call_count == 4
+
+    def test_interrupted_run_checkpoint_is_persisted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        mgr = _make_manager(tmp_path)
+        runner = SubAgentRunner(mgr)
+
+        monkeypatch.setenv("SUB_AGENT_MAX_TURNS", "2")
+
+        mock_sub = _make_mock_llm()
+        mock_sub.chat.return_value = LLMResponse(
+            content="<shell>echo loop</shell>",
+            input_tokens=10,
+            output_tokens=10,
+            model="test-model",
+            finish_reason="stop",
+        )
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
+
+        result = runner.spawn("Worker", "developer", "無限ループ")
+        m = re.search(r"run_id:\s*([A-Za-z0-9_-]+)", result)
+        assert m is not None
+
+        run_id = m.group(1)
+        checkpoint = runner.get_run_checkpoint(run_id)
+        assert checkpoint is not None
+        assert checkpoint.get("status") == "interrupted"
 
 
 # ---------------------------------------------------------------------------

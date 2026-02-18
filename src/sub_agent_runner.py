@@ -8,9 +8,13 @@ Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -27,9 +31,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MAX_CONVERSATION_TURNS = 10
-DEFAULT_WIP_LIMIT = 3
+def _read_int_env(key: str, default: int) -> int:
+    raw = (os.environ.get(key) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
 
+
+MAX_CONVERSATION_TURNS = _read_int_env("SUB_AGENT_MAX_TURNS", 0)
+MAX_CONVERSATION_WALL_SECONDS = _read_int_env("SUB_AGENT_MAX_WALL_SECONDS", 0)
+DEFAULT_WIP_LIMIT = 3
+_PROGRESS_ITEMS_LIMIT = 20
 
 
 
@@ -425,6 +440,7 @@ class SubAgentRunner:
             "軽微な環境整備（依存関係のインストール/設定修正/再起動など）は独断で続行してよい（例: wp が PHP 不足で動かないなら PHP をインストールして再検証する）。",
             "同じコマンド列を繰り返し使うと判断したら、/opt/apps/ai-company/tools/ai new <name> で共通ツール化するか、手順SoTとして保存して再利用する。",
             "許可取りはしない。確認が必要なのは「会社方針/予算/外部課金・契約/不可逆・高リスク操作」に関わる場合だけ。",
+            "長時間タスクは進捗を分割して進める。中断時は run_id・実施済み・残作業 を必ず報告し、再開可能な状態で止める。",
             "",
             "## 組織ルール",
             "- 正社員AIは継続担当として一貫性を維持する。重要な進捗・判断は自分のメモリに残す。",
@@ -528,22 +544,126 @@ class SubAgentRunner:
         ]
 
         work_dir = self.manager.base_dir / "companies" / self.manager.company_id
+        run_id = f"run-{uuid4().hex[:10]}"
+        started_at = datetime.now(timezone.utc)
+        max_turns = _read_int_env("SUB_AGENT_MAX_TURNS", MAX_CONVERSATION_TURNS)
+        max_wall_seconds = _read_int_env("SUB_AGENT_MAX_WALL_SECONDS", MAX_CONVERSATION_WALL_SECONDS)
+        progress_items: list[str] = []
 
-        for turn in range(MAX_CONVERSATION_TURNS):
-            # Budget check
+        def _elapsed_seconds() -> int:
+            return int((datetime.now(timezone.utc) - started_at).total_seconds())
+
+        def _remember(note: str) -> None:
+            note_text = (note or "").strip()
+            if not note_text:
+                return
+            stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            progress_items.append(f"{stamp} {note_text}")
+            if len(progress_items) > _PROGRESS_ITEMS_LIMIT:
+                del progress_items[:-_PROGRESS_ITEMS_LIMIT]
+
+        def _save_checkpoint(
+            *,
+            status: str,
+            reason: str,
+            turn: int,
+            pending_hint: str = "",
+            result_text: str = "",
+        ) -> None:
+            self._persist_run_checkpoint(
+                run_id=run_id,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                role=role,
+                model=llm_client.model,
+                task_description=task_description,
+                turn=turn,
+                elapsed_seconds=_elapsed_seconds(),
+                status=status,
+                reason=reason,
+                pending_hint=pending_hint,
+                progress_items=progress_items,
+                result_text=result_text,
+            )
+
+        def _interrupt(
+            *,
+            reason: str,
+            turn: int,
+            pending_hint: str,
+        ) -> str:
+            _save_checkpoint(
+                status="interrupted",
+                reason=reason,
+                turn=turn,
+                pending_hint=pending_hint,
+            )
+            report = self._build_interruption_report(
+                run_id=run_id,
+                agent_name=agent_name,
+                role=role,
+                reason=reason,
+                turn=turn,
+                elapsed_seconds=_elapsed_seconds(),
+                progress_items=progress_items,
+                pending_hint=pending_hint,
+            )
+            self._log_activity(
+                f"社員AI中断: name={agent_name} role={role} run_id={run_id} "
+                f"reason={self._summarize(reason, limit=120)}"
+            )
+            return report
+
+        resume_run_id = self._extract_resume_run_id(task_description)
+        if resume_run_id:
+            checkpoint = self.get_run_checkpoint(resume_run_id)
+            resume_context = self._build_resume_context(checkpoint) if checkpoint else ""
+            if resume_context:
+                conversation.append({"role": "user", "content": resume_context})
+                _remember(f"再開コンテキストを適用(run_id={resume_run_id})")
+
+        _save_checkpoint(status="running", reason="started", turn=0)
+
+        turn = 0
+        while True:
+            turn += 1
+
+            if max_turns > 0 and turn > max_turns:
+                return _interrupt(
+                    reason=f"会話ターン上限({max_turns})に到達",
+                    turn=turn - 1,
+                    pending_hint="作業を2〜5ステップ単位に分割し、employee resumeで継続してください。",
+                )
+
+            if max_wall_seconds > 0 and _elapsed_seconds() >= max_wall_seconds:
+                return _interrupt(
+                    reason=f"実行時間上限({max_wall_seconds}秒)に到達",
+                    turn=turn - 1,
+                    pending_hint="同じrun_idで再開し、残作業を継続してください。",
+                )
+
             if self._is_budget_exceeded(agent_id, budget_limit_usd):
                 logger.warning("Budget exceeded for agent %s", agent_id)
                 self.manager.agent_registry.update_status(agent_id, "inactive")
-                return f"予算上限(${budget_limit_usd})に達したため停止しました"
+                _remember(f"予算上限(${budget_limit_usd})到達")
+                return _interrupt(
+                    reason=f"予算上限(${budget_limit_usd})に到達",
+                    turn=turn - 1,
+                    pending_hint="予算見直し、またはタスクを細分化して再開してください。",
+                )
 
-            # LLM call
             llm_result = llm_client.chat(conversation)
 
             if isinstance(llm_result, LLMError):
                 logger.error("LLM call failed for agent %s: %s", agent_id, llm_result.message)
+                _save_checkpoint(
+                    status="failed",
+                    reason=f"LLMエラー: {llm_result.message}",
+                    turn=turn,
+                    result_text=f"LLMエラー: {llm_result.message}",
+                )
                 return f"LLMエラー: {llm_result.message}"
 
-            # Record cost
             self.manager.record_llm_call(
                 provider="openrouter",
                 model=llm_result.model,
@@ -554,7 +674,6 @@ class SubAgentRunner:
 
             conversation.append({"role": "assistant", "content": llm_result.content})
 
-            # Parse response
             actions = parse_response(llm_result.content)
             if actions:
                 kinds = ", ".join(a.action_type for a in actions)
@@ -566,7 +685,10 @@ class SubAgentRunner:
             for action in actions:
                 if action.action_type == "done":
                     done_result = action.content
+                    _remember(f"done候補: {self._summarize(done_result, limit=80)}")
                 elif action.action_type == "shell_command":
+                    command_summary = self._summarize(action.content, limit=100)
+                    _remember(f"shell実行: {command_summary}")
                     self._log_activity(f"社員AIツール利用: name={agent_name} tool=shell")
                     shell_result = execute_shell(command=action.content, cwd=work_dir)
                     result_text = (
@@ -578,12 +700,13 @@ class SubAgentRunner:
                         result_text += f"stderr:\n{shell_result.stderr}\n"
                     conversation.append({"role": "user", "content": result_text})
                     needs_followup = True
-                    break  # Process shell result in next turn
+                    break
                 elif action.action_type == "research":
-                    self._log_activity(f"社員AIツール利用: name={agent_name} tool=web_search")
                     query = action.content.strip()
                     if not query:
                         continue
+                    _remember(f"web検索: {self._summarize(query, limit=90)}")
+                    self._log_activity(f"社員AIツール利用: name={agent_name} tool=web_search")
                     try:
                         search_results = self.manager.web_searcher.search(query)
                     except Exception:
@@ -628,6 +751,7 @@ class SubAgentRunner:
                     payload = (action.content or "").strip()
                     if not payload:
                         continue
+                    _remember(f"mcp呼び出し: {self._summarize(payload, limit=90)}")
                     try:
                         result_text = self.manager.mcp_client.run_action(payload)
                     except Exception as exc:
@@ -642,7 +766,7 @@ class SubAgentRunner:
                     raw = (action.content or "").strip()
                     if not raw:
                         continue
-                    import re
+                    _remember(f"memory保存: {self._summarize(raw, limit=90)}")
 
                     first, *rest = raw.splitlines()
                     m = re.match(r"^(curated|daily|pin)\s*[:：]?\s*(.*)$", first.strip(), re.IGNORECASE)
@@ -708,6 +832,7 @@ class SubAgentRunner:
                         cmd = raw_cmd.strip()
                         if not cmd:
                             continue
+                        _remember(f"control実行: {self._summarize(cmd, limit=90)}")
                         handled, result_text = self.manager._handle_runtime_control_command(
                             cmd,
                             actor_id=agent_id,
@@ -724,9 +849,16 @@ class SubAgentRunner:
                     conversation.append({"role": "user", "content": result_text})
                     needs_followup = True
                     break
+                elif action.action_type == "reply":
+                    reply_text = (action.content or "").strip()
+                    if reply_text:
+                        _remember(f"reply: {self._summarize(reply_text, limit=90)}")
 
             if done_result is not None:
-                self._log_activity(f"社員AI→CEO 完了報告: name={agent_name} role={role} done={self._summarize(done_result, limit=220)}")
+                self._log_activity(
+                    f"社員AI→CEO 完了報告: name={agent_name} role={role} "
+                    f"done={self._summarize(done_result, limit=220)}"
+                )
 
                 reply_actions = [a for a in actions if a.action_type == "reply"]
                 if reply_actions:
@@ -737,21 +869,183 @@ class SubAgentRunner:
                     if reply_text and done_text and done_text not in reply_text:
                         merged = (reply_text + "\n\n" + done_text).strip()
 
+                    _save_checkpoint(
+                        status="completed",
+                        reason="done",
+                        turn=turn,
+                        result_text=merged,
+                    )
                     return merged
 
+                _save_checkpoint(
+                    status="completed",
+                    reason="done",
+                    turn=turn,
+                    result_text=done_result,
+                )
                 return done_result
 
             if not needs_followup:
-                # No shell command and no done → treat last reply as result
                 reply_actions = [a for a in actions if a.action_type == "reply"]
                 if reply_actions:
-                    self._log_activity(f"社員AI→CEO reply: name={agent_name} role={role} text={self._summarize(reply_actions[-1].content, limit=220)}")
-                    return reply_actions[-1].content
-                self._log_activity(f"社員AI→CEO 応答: name={agent_name} role={role} text={self._summarize(llm_result.content, limit=220)}")
+                    text = reply_actions[-1].content
+                    self._log_activity(
+                        f"社員AI→CEO reply: name={agent_name} role={role} "
+                        f"text={self._summarize(text, limit=220)}"
+                    )
+                    _save_checkpoint(
+                        status="completed",
+                        reason="reply_only",
+                        turn=turn,
+                        result_text=text,
+                    )
+                    return text
+
+                self._log_activity(
+                    f"社員AI→CEO 応答: name={agent_name} role={role} "
+                    f"text={self._summarize(llm_result.content, limit=220)}"
+                )
+                _save_checkpoint(
+                    status="completed",
+                    reason="assistant_only",
+                    turn=turn,
+                    result_text=llm_result.content,
+                )
                 return llm_result.content
 
-        self._log_activity(f"社員AI停止: name={agent_name} role={role} reason=最大会話ターン数")
-        return "最大会話ターン数に達したため停止しました"
+            _save_checkpoint(status="running", reason="followup", turn=turn)
+
+    @staticmethod
+    def _extract_resume_run_id(text: str) -> str | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        m = re.search(r"(?:run_id|run)\s*[:=]\s*([A-Za-z0-9_-]{4,64})", raw, re.IGNORECASE)
+        if not m:
+            return None
+        return m.group(1)
+
+    def _run_checkpoint_path(self) -> Path:
+        return self.manager.base_dir / "companies" / self.manager.company_id / "state" / "sub_agent_runs.ndjson"
+
+    def _persist_run_checkpoint(
+        self,
+        *,
+        run_id: str,
+        agent_id: str,
+        agent_name: str,
+        role: str,
+        model: str,
+        task_description: str,
+        turn: int,
+        elapsed_seconds: int,
+        status: str,
+        reason: str,
+        pending_hint: str,
+        progress_items: list[str],
+        result_text: str,
+    ) -> None:
+        path = self._run_checkpoint_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id,
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "employee_id": agent_id if str(agent_id).startswith("emp-") else "",
+            "role": role,
+            "model": model,
+            "status": status,
+            "reason": reason,
+            "task_description": task_description,
+            "turn": turn,
+            "elapsed_seconds": elapsed_seconds,
+            "pending_hint": pending_hint,
+            "progress": progress_items[-_PROGRESS_ITEMS_LIMIT:],
+            "result_text": self._summarize(result_text, limit=400),
+        }
+        with path.open('a', encoding='utf-8') as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + '\n')
+
+    def get_run_checkpoint(self, run_id: str) -> dict | None:
+        key = (run_id or '').strip()
+        if not key:
+            return None
+        path = self._run_checkpoint_path()
+        if not path.exists():
+            return None
+
+        latest: dict | None = None
+        try:
+            with path.open('r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except Exception:
+                        continue
+                    if str(item.get('run_id') or '') == key:
+                        latest = item
+        except Exception:
+            logger.warning('Failed to read sub-agent checkpoints', exc_info=True)
+            return None
+        return latest
+
+    def _build_resume_context(self, checkpoint: dict | None) -> str:
+        if not checkpoint:
+            return ''
+        run_id = str(checkpoint.get('run_id') or '').strip()
+        if not run_id:
+            return ''
+        progress = checkpoint.get('progress') or []
+        if isinstance(progress, list):
+            progress_lines = [f"- {str(x)}" for x in progress[-8:] if str(x).strip()]
+        else:
+            progress_lines = []
+        if not progress_lines:
+            progress_lines = ['- 進捗ログなし']
+        pending_hint = str(checkpoint.get('pending_hint') or '').strip() or '残作業を洗い出して継続してください。'
+
+        return '\n'.join([
+            '前回中断した作業のチェックポイントを読み込みました。',
+            f'run_id: {run_id}',
+            '実施済み:',
+            *progress_lines,
+            '継続方針:',
+            f'- {pending_hint}',
+            'この情報を踏まえて、重複実行を避けて次の未完了作業から再開してください。',
+        ])
+
+    def _build_interruption_report(
+        self,
+        *,
+        run_id: str,
+        agent_name: str,
+        role: str,
+        reason: str,
+        turn: int,
+        elapsed_seconds: int,
+        progress_items: list[str],
+        pending_hint: str,
+    ) -> str:
+        progress_lines = [f"- {item}" for item in progress_items[-8:]]
+        if not progress_lines:
+            progress_lines = ['- 進捗ログなし']
+
+        return '\n'.join([
+            '⚠️ 社員AI中断報告',
+            f'run_id: {run_id}',
+            f'agent: {agent_name} (role={role})',
+            f'理由: {reason}',
+            f'進捗: {turn}ターン / {elapsed_seconds}秒',
+            '実施済み:',
+            *progress_lines,
+            '再開方針:',
+            f'- {pending_hint}',
+            f'- 再開コマンド例: employee resume {run_id}',
+        ])
 
     @staticmethod
     def _summarize(text: str, *, limit: int = 240) -> str:

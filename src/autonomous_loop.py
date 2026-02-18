@@ -9,6 +9,7 @@ Requirements: 3.2, 3.3, 3.4, 3.5, 3.6, 3.7
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -30,7 +31,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_WIP_LIMIT = 3
-MAX_TASK_TURNS = 100
+
+
+def _read_int_env(key: str, default: int) -> int:
+    raw = (os.environ.get(key) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
+MAX_TASK_TURNS = _read_int_env("AUTONOMOUS_MAX_TURNS", 100)
+MAX_TASK_WALL_SECONDS = _read_int_env("AUTONOMOUS_MAX_WALL_SECONDS", 0)
 MAX_PENDING_CONSULTATIONS = 5
 # runningタスクがこの秒数以上updated_atから経過したらstuckとみなす
 STUCK_TASK_TIMEOUT_SECONDS = 1800  # 30分
@@ -402,7 +416,19 @@ class AutonomousLoop:
         try:
             shell_tracker = ShellCommandTracker()
             artifact_fix_attempts = 0
-            for _turn in range(MAX_TASK_TURNS):
+            max_task_turns = _read_int_env("AUTONOMOUS_MAX_TURNS", MAX_TASK_TURNS)
+            max_wall_seconds = _read_int_env("AUTONOMOUS_MAX_WALL_SECONDS", MAX_TASK_WALL_SECONDS)
+            started_at = time.monotonic()
+            interruption_reason: str | None = None
+            turn = 0
+            while True:
+                turn += 1
+                if max_task_turns > 0 and turn > max_task_turns:
+                    interruption_reason = f"最大ターン数到達({max_task_turns})"
+                    break
+                if max_wall_seconds > 0 and (time.monotonic() - started_at) >= max_wall_seconds:
+                    interruption_reason = f"実行時間上限到達({max_wall_seconds}秒)"
+                    break
                 # Budget check each turn
                 if self.manager.check_budget():
                     self.manager.task_queue.update_status(
@@ -784,9 +810,9 @@ class AutonomousLoop:
                     self._check_parent_completion(task)
                     return
 
-            # Max turns reached
+            reason = interruption_reason or "ターン/時間ガード到達"
             self.manager.task_queue.update_status(
-                task.task_id, "failed", error="最大ターン数到達"
+                task.task_id, "paused", error=reason
             )
             try:
                 mm = getattr(self.manager, "memory_manager", None)
@@ -795,14 +821,20 @@ class AutonomousLoop:
                         timestamp=datetime.now(timezone.utc),
                         user_id="autonomous_loop",
                         request_text=f"[task:{task.task_id}] {task.description}",
-                        response_text="FAILED: 最大ターン数到達",
-                        snapshot_lines=["reason: max_turns"],
+                        response_text=f"PAUSED: {reason}",
+                        snapshot_lines=[f"reason: {reason}", f"turn: {turn}"] ,
                     )
                     mm.ingest_all_sources()
             except Exception:
                 logger.warning("Failed to persist task outcome", exc_info=True)
             self._check_parent_completion(task)
-            self._report(f"タスク中断(最大ターン数): {task.description}", task=task)
+            self._report(
+                f"タスク中断({reason}): {task.description}\n"
+                f"- task_id: {task.task_id}\n"
+                f"- 進捗ターン: {turn - 1}\n"
+                f"- 再開方法: Slackで `再開 {task.task_id}` または同等の再開指示を送ってください。",
+                task=task,
+            )
 
         except Exception as exc:
             logger.exception("Error executing task %s", task.task_id)
