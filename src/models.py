@@ -399,3 +399,22 @@ class PolicyMemoryEntry(BaseModel):
     task_id: Optional[str] = None
     conflict_with: List[str] = Field(default_factory=list)
     importance: int = Field(default=3, ge=1, le=5)
+
+
+# --- Adaptive Memory (dynamic long-term memory domains) ---
+
+class AdaptiveMemoryEntry(BaseModel):
+    """動的ドメインで管理する長期記憶エントリ。"""
+
+    memory_id: str
+    created_at: datetime
+    updated_at: datetime
+    domain: str
+    status: Literal["active", "archived", "pruned"] = "active"
+    content: str
+    source: str
+    user_id: Optional[str] = None
+    task_id: Optional[str] = None
+    importance: int = Field(default=3, ge=1, le=5)
+    tags: List[str] = Field(default_factory=list)
+    last_accessed_at: Optional[datetime] = None

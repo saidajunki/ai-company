@@ -66,6 +66,7 @@ from model_catalog import build_model_catalog, format_model_catalog_for_prompt
 from memory_manager import MemoryManager
 from memory_vault import DEFAULT_CURATED_MEMORY, curated_memory_path, MemoryVault
 from policy_memory_store import PolicyMemoryStore
+from adaptive_memory_store import AdaptiveMemoryStore
 from web_searcher import WebSearcher
 from task_queue import TaskQueue
 from vision_loader import DEFAULT_VISION, VisionLoader
@@ -190,6 +191,7 @@ class Manager:
             logger.warning("Failed to initialize memory manager", exc_info=True)
             self.memory_manager = None
         self.policy_memory = PolicyMemoryStore(base_dir, company_id)
+        self.adaptive_memory = AdaptiveMemoryStore(base_dir, company_id)
 
         # Autonomous growth components
         self.vision_loader = VisionLoader(base_dir, company_id)
@@ -265,6 +267,13 @@ class Manager:
             self.policy_memory.compact()
         except Exception:
             logger.warning("Failed to initialize policy memory", exc_info=True)
+
+        # Ensure adaptive memory (dynamic memory domains)
+        try:
+            self.adaptive_memory.ensure_initialized()
+            self.adaptive_memory.compact_and_prune()
+        except Exception:
+            logger.warning("Failed to initialize adaptive memory", exc_info=True)
 
         # Determine what to do first after wakeup
         action, description = determine_recovery_action(self.state)
@@ -767,6 +776,17 @@ class Manager:
             except Exception:
                 logger.warning("Failed to ingest policy memory from message", exc_info=True)
 
+            # Ingest dynamic important memories (beyond fixed policy/budget/rules)
+            try:
+                self.adaptive_memory.ingest_text(
+                    stripped,
+                    source="creator_message",
+                    user_id=user_id,
+                    task_id=task_id,
+                )
+            except Exception:
+                logger.warning("Failed to ingest adaptive memory from message", exc_info=True)
+
             # --- Creator directive (pause/cancel/resume) ---
             try:
                 directive = parse_creator_directive(stripped, thread_context=slack_thread_context)
@@ -974,6 +994,15 @@ class Manager:
             except Exception:
                 logger.warning("Failed to load policy memory context", exc_info=True)
 
+            # Load adaptive memory context (dynamic domains + forgetting)
+            adaptive_memory_text = None
+            adaptive_domains_text = None
+            try:
+                adaptive_memory_text = self.adaptive_memory.format_active(limit=24)
+                adaptive_domains_text = self.adaptive_memory.format_domains(limit=16)
+            except Exception:
+                logger.warning("Failed to load adaptive memory context", exc_info=True)
+
             system_prompt = build_system_prompt(
                 constitution=self.state.constitution,
                 wip=self.state.wip,
@@ -997,6 +1026,8 @@ class Manager:
                 policy_memory_text=policy_memory_text,
                 policy_timeline_text=policy_timeline_text,
                 policy_conflicts_text=policy_conflicts_text,
+                adaptive_memory_text=adaptive_memory_text,
+                adaptive_domains_text=adaptive_domains_text,
             )
 
             conversation: list[dict[str, str]] = [
@@ -1323,6 +1354,16 @@ class Manager:
                             )
                         except Exception:
                             logger.warning("Failed to ingest policy memory from memory action", exc_info=True)
+
+                        try:
+                            self.adaptive_memory.ingest_text(
+                                payload,
+                                source=f"memory_{op}",
+                                user_id="ceo",
+                                task_id=task_id,
+                            )
+                        except Exception:
+                            logger.warning("Failed to ingest adaptive memory from memory action", exc_info=True)
                     except Exception as exc:
                         logger.warning("Memory action failed: %s", exc, exc_info=True)
                         result_text = f"メモリ保存エラー: {exc}"
