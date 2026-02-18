@@ -200,6 +200,10 @@ class SubAgentRunner:
 
         # Create independent LLMClient for this sub-agent
         sub_client = self._create_llm_client(effective_model)
+        self._log_activity(
+            f"社員AI起動: name={display_name} role={role} model={effective_model} "
+            f"task={self._summarize(task_description, limit=220)}"
+        )
 
         # Register in AgentRegistry with effective model name
         self.manager.agent_registry.register(
@@ -246,6 +250,8 @@ class SubAgentRunner:
         try:
             result = self._run_conversation(
                 agent_id=agent_id,
+                agent_name=display_name,
+                role=role,
                 system_prompt=system_prompt,
                 task_description=task_description,
                 budget_limit_usd=budget_limit_usd,
@@ -255,12 +261,17 @@ class SubAgentRunner:
             logger.exception("Sub-agent %s failed: %s", agent_id, exc)
             self.manager.agent_registry.update_status(agent_id, "inactive")
             result = f"エラー: {exc}"
+            self._log_activity(f"社員AI異常終了: name={display_name} role={role} error={self._summarize(str(exc), limit=200)}")
 
         # Mark agent as inactive after completion
         try:
             self.manager.agent_registry.update_status(agent_id, "inactive")
         except Exception:
             logger.warning("Failed to deactivate agent %s", agent_id, exc_info=True)
+
+        self._log_activity(
+            f"社員AI完了: name={display_name} role={role} result={self._summarize(result, limit=260)}"
+        )
 
         # Persist sub-agent outcome into long-term summary/journal (best-effort)
         try:
@@ -375,6 +386,8 @@ class SubAgentRunner:
     def _run_conversation(
         self,
         agent_id: str,
+        agent_name: str,
+        role: str,
         system_prompt: str,
         task_description: str,
         budget_limit_usd: float,
@@ -418,6 +431,9 @@ class SubAgentRunner:
 
             # Parse response
             actions = parse_response(llm_result.content)
+            if actions:
+                kinds = ", ".join(a.action_type for a in actions)
+                self._log_activity(f"社員AI処理: name={agent_name} role={role} actions={kinds}")
 
             done_result = None
             needs_followup = False
@@ -426,6 +442,7 @@ class SubAgentRunner:
                 if action.action_type == "done":
                     done_result = action.content
                 elif action.action_type == "shell_command":
+                    self._log_activity(f"社員AIツール利用: name={agent_name} tool=shell")
                     shell_result = execute_shell(command=action.content, cwd=work_dir)
                     result_text = (
                         f"コマンド実行結果 (return_code={shell_result.return_code}):\n"
@@ -438,6 +455,7 @@ class SubAgentRunner:
                     needs_followup = True
                     break  # Process shell result in next turn
                 elif action.action_type == "research":
+                    self._log_activity(f"社員AIツール利用: name={agent_name} tool=web_search")
                     query = action.content.strip()
                     if not query:
                         continue
@@ -481,6 +499,7 @@ class SubAgentRunner:
                     needs_followup = True
                     break
                 elif action.action_type == "memory":
+                    self._log_activity(f"社員AIツール利用: name={agent_name} tool=memory")
                     raw = (action.content or "").strip()
                     if not raw:
                         continue
@@ -544,16 +563,35 @@ class SubAgentRunner:
                     break
 
             if done_result is not None:
+                self._log_activity(f"社員AI→CEO 完了報告: name={agent_name} role={role} done={self._summarize(done_result, limit=220)}")
                 return done_result
 
             if not needs_followup:
                 # No shell command and no done → treat last reply as result
                 reply_actions = [a for a in actions if a.action_type == "reply"]
                 if reply_actions:
+                    self._log_activity(f"社員AI→CEO reply: name={agent_name} role={role} text={self._summarize(reply_actions[-1].content, limit=220)}")
                     return reply_actions[-1].content
+                self._log_activity(f"社員AI→CEO 応答: name={agent_name} role={role} text={self._summarize(llm_result.content, limit=220)}")
                 return llm_result.content
 
+        self._log_activity(f"社員AI停止: name={agent_name} role={role} reason=最大会話ターン数")
         return "最大会話ターン数に達したため停止しました"
+
+    @staticmethod
+    def _summarize(text: str, *, limit: int = 240) -> str:
+        s = " ".join((text or "").split())
+        if len(s) > limit:
+            return s[:limit] + "…"
+        return s
+
+    def _log_activity(self, message: str) -> None:
+        try:
+            fn = getattr(self.manager, "_activity_log", None)
+            if callable(fn):
+                fn(message)
+        except Exception:
+            logger.warning("Failed to emit sub-agent activity log", exc_info=True)
 
     def _is_budget_exceeded(self, agent_id: str, budget_limit_usd: float) -> bool:
         """指定エージェントのコストが予算上限を超えているか確認する."""

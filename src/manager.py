@@ -181,6 +181,8 @@ class Manager:
         self._slack_reply_thread_ts: str | None = None
         self._trace_thread_ts: str | None = None
         self._trace_enabled = os.environ.get("SLACK_TRACE_ENABLED", "1").strip().lower() not in ("0", "false", "off", "no")
+        self._activity_log_enabled = os.environ.get("SLACK_ACTIVITY_LOG_ENABLED", "1").strip().lower() not in ("0", "false", "off", "no")
+        self._activity_log_channel = os.environ.get("SLACK_ACTIVITY_LOG_CHANNEL", "C0AFPAYTLP4").strip() or None
 
         # Conversation memory (Req 1.1, 1.5)
         self.conversation_memory = ConversationMemory(base_dir, company_id)
@@ -762,6 +764,7 @@ class Manager:
             stripped = (text or "").strip()
             self._bootstrap_trace_thread(stripped)
             self._trace_event("依頼を受信。意図解析を開始")
+            self._activity_log(f"Creator→CEO: {self._summarize_for_activity_log(stripped, limit=500)}")
 
             # Ingest policy/rule/budget memories from incoming conversation
             try:
@@ -1665,6 +1668,7 @@ class Manager:
                 elif action.action_type == "shell_command":
                     logger.info("Executing shell: %s", action.content)
                     self._trace_event(f"シェル実行中: {self._sanitize_trace_text(action.content)}")
+                    self._activity_log("CEOツール利用: shell")
                     shell_result = execute_shell(
                         command=action.content,
                         cwd=work_dir,
@@ -1717,6 +1721,7 @@ class Manager:
                 elif action.action_type == "consult":
                     logger.info("Consultation requested: %s", action.content[:120])
                     self._trace_event(f"consult判定中: {self._sanitize_trace_text(action.content)}")
+                    self._activity_log("CEO判断: consultを検討")
                     consult_text = action.content.strip()
                     assessment = assess_creator_consultation(
                         consult_text,
@@ -1802,6 +1807,7 @@ class Manager:
                 elif action.action_type == "research":
                     logger.info("Executing research: %s", action.content)
                     self._trace_event(f"Web検索を実行: {self._sanitize_trace_text(action.content)}")
+                    self._activity_log(f"CEOツール利用: web_search ({self._summarize_for_activity_log(action.content, limit=120)})")
                     search_results = self.web_searcher.search(action.content)
 
                     # Save each result as a ResearchNote
@@ -1872,6 +1878,7 @@ class Manager:
                 elif action.action_type == "publish":
                     logger.info("Executing publish: %s", action.content)
                     self._trace_event(f"publish操作を実行: {self._sanitize_trace_text(action.content)}")
+                    self._activity_log(f"CEOツール利用: publish ({self._summarize_for_activity_log(action.content, limit=120)})")
                     content = action.content.strip()
                     parts = content.split(":", 2)
                     operation = parts[0] if parts else ""
@@ -2000,6 +2007,10 @@ class Manager:
                     model_hint = action.model or "auto"
                     self._trace_event(f"社員AIへ委任: role={role} model={model_hint}")
                     self._trace_event("社員AIへの指示:\n```\n" + self._sanitize_trace_text(delegation_brief[:1600]) + "\n```")
+                    self._activity_log(
+                        f"CEO→社員AI 委任: role={role} model={model_hint} "
+                        f"task={self._summarize_for_activity_log(desc, limit=240)}"
+                    )
 
                     try:
                         result = self.sub_agent_runner.spawn(
@@ -2009,9 +2020,16 @@ class Manager:
                             model=action.model,
                         )
                         result_text = f"サブエージェント結果 (role={role}):\n{result}"
+                        self._activity_log(
+                            f"社員AI→CEO 報告: role={role} "
+                            f"result={self._summarize_for_activity_log(result, limit=320)}"
+                        )
                     except Exception as exc:
                         logger.warning("Sub-agent spawn failed: %s", exc, exc_info=True)
                         result_text = f"サブエージェントエラー (role={role}): {exc}"
+                        self._activity_log(
+                            f"社員AIエラー: role={role} error={self._summarize_for_activity_log(str(exc), limit=220)}"
+                        )
 
                     conversation.append({"role": "user", "content": result_text})
 
@@ -2301,6 +2319,24 @@ class Manager:
             s = s[:1800] + "…"
         return s
 
+    @staticmethod
+    def _summarize_for_activity_log(text: str, *, limit: int = 300) -> str:
+        s = " ".join((text or "").split())
+        if len(s) > limit:
+            return s[:limit] + "…"
+        return s
+
+    def _activity_log(self, message: str) -> None:
+        if not self._activity_log_enabled or self.slack is None:
+            return
+        channel = self._activity_log_channel
+        if not channel:
+            return
+        safe = self._sanitize_trace_text(message)
+        if not safe:
+            return
+        self.slack.send_message(f"📌 {safe}", channel=channel)
+
     def _slack_send(
         self,
         text: str,
@@ -2310,9 +2346,12 @@ class Manager:
     ) -> str | None:
         """Send a message via Slack if the bot is configured."""
         if self.slack is not None:
+            target_channel = channel or self._slack_reply_channel
+            if target_channel and target_channel != self._activity_log_channel:
+                self._activity_log(f"CEO→Creator: {self._summarize_for_activity_log(text, limit=700)}")
             return self.slack.send_message(
                 text,
-                channel=channel or self._slack_reply_channel,
+                channel=target_channel,
                 thread_ts=thread_ts or self._slack_reply_thread_ts,
             )
         logger.warning("Slack not configured, message not sent: %s", text[:100])
