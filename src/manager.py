@@ -1964,9 +1964,9 @@ class Manager:
                 elif action.action_type == "delegate":
                     logger.info("Delegating to sub-agent: %s", action.content[:120])
                     content = action.content.strip()
-                    role, _, desc = content.partition(":")
-                    role = role.strip() or "worker"
+                    role_part, _, desc = content.partition(":")
                     desc = desc.strip() or content
+                    role = self._normalize_delegate_role(role_part, desc)
 
                     now = datetime.now(timezone.utc)
                     spent = compute_window_cost(self.state.ledger_events, now)
@@ -2107,6 +2107,30 @@ class Manager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_delegate_role(role_part: str, desc: str) -> str:
+        import re
+
+        generic = {"role", "agent", "sub-agent", "subagent", "worker", "社員", "employee", "staff", "member"}
+        role = (role_part or "").strip()
+        if not role:
+            role = "worker"
+
+        role_l = role.lower()
+        if role_l not in generic:
+            return role
+
+        first_token = (desc or "").strip().split()[0] if (desc or "").strip() else ""
+        token = first_token.strip(" :：,-_()").lower()
+        if token and token not in generic and re.fullmatch(r"[a-z][a-z0-9_-]{1,40}", token):
+            return token
+
+        m = re.search(r"\b(researcher|writer|analyst|developer|engineer|web-developer|devops|qa|designer)\b", (desc or "").lower())
+        if m:
+            return m.group(1)
+
+        return "worker"
 
     @staticmethod
     def _is_agent_list_request(text: str) -> bool:
