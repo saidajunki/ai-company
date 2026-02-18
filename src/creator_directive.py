@@ -49,6 +49,24 @@ def _derive_query(text: str) -> str | None:
     return t if len(t) >= 3 else None
 
 
+def _looks_like_directive_text(raw: str, normalized: str) -> bool:
+    if _TASK_ID_RE.search(raw) or _CONSULT_ID_RE.search(raw) or _INITIATIVE_ID_RE.search(raw):
+        return True
+
+    head = normalized.strip().lower()
+    if head.startswith(("pause", "hold", "cancel", "stop", "resume", "保留", "中止", "停止", "再開")):
+        return True
+
+    imperative_markers = (
+        "してください", "して下さい", "してほしい", "して欲しい",
+        "お願いします", "お願い", "頼む", "してくれ", "しろ",
+        "保留で", "中止で", "停止で", "再開で",
+        "保留して", "中止して", "停止して", "再開して",
+        "やめて", "止めて",
+    )
+    return any(marker in normalized for marker in imperative_markers)
+
+
 def parse_creator_directive(
     text: str,
     *,
@@ -98,6 +116,9 @@ def parse_creator_directive(
     else:
         return None
 
+    if not _looks_like_directive_text(raw, normalized):
+        return None
+
     task_id = _last_match(_TASK_ID_RE, raw) or _last_match(_TASK_ID_RE, thread_context or "")
     consult_id = _last_match(_CONSULT_ID_RE, raw) or _last_match(_CONSULT_ID_RE, thread_context or "")
     initiative_id = _last_match(_INITIATIVE_ID_RE, raw) or _last_match(_INITIATIVE_ID_RE, thread_context or "")
@@ -110,4 +131,3 @@ def parse_creator_directive(
         initiative_id=initiative_id,
         query=_derive_query(raw),
     )
-
