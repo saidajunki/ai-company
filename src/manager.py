@@ -63,7 +63,9 @@ from initiative_store import InitiativeStore
 from initiative_planner import InitiativePlanner
 from strategy_analyzer import StrategyAnalyzer
 from model_catalog import build_model_catalog, format_model_catalog_for_prompt
+from memory_manager import MemoryManager
 from memory_vault import DEFAULT_CURATED_MEMORY, curated_memory_path, MemoryVault
+from policy_memory_store import PolicyMemoryStore
 from web_searcher import WebSearcher
 from task_queue import TaskQueue
 from vision_loader import DEFAULT_VISION, VisionLoader
@@ -182,7 +184,12 @@ class Manager:
         self.consultation_store = ConsultationStore(base_dir, company_id)
         self.commitment_store = CommitmentStore(base_dir, company_id)
         self.memory_vault = MemoryVault(base_dir, company_id)
-        self.memory_manager = None
+        try:
+            self.memory_manager: MemoryManager | None = MemoryManager(base_dir, company_id)
+        except Exception:
+            logger.warning("Failed to initialize memory manager", exc_info=True)
+            self.memory_manager = None
+        self.policy_memory = PolicyMemoryStore(base_dir, company_id)
 
         # Autonomous growth components
         self.vision_loader = VisionLoader(base_dir, company_id)
@@ -237,6 +244,27 @@ class Manager:
             self.memory_vault.ensure_initialized()
         except Exception:
             logger.warning("Failed to initialize memory vault", exc_info=True)
+
+        # Bootstrap long-term memory (best-effort)
+        try:
+            if self.memory_manager is not None:
+                self.memory_manager.bootstrap()
+        except Exception:
+            logger.warning("Memory bootstrap failed", exc_info=True)
+
+        # Ensure policy memory and seed stable paths/rules
+        try:
+            repo_root = Path(os.environ.get("APP_REPO_PATH", "/opt/apps/ai-company")).expanduser().resolve()
+            restart_flag = (self.base_dir / "companies" / self.company_id / "state" / "restart_manager.flag").resolve()
+            self.policy_memory.ensure_initialized()
+            self.policy_memory.seed_defaults(
+                app_repo_path=str(repo_root),
+                system_prompt_file=str(repo_root / "src" / "context_builder.py"),
+                restart_flag_path=str(restart_flag),
+            )
+            self.policy_memory.compact()
+        except Exception:
+            logger.warning("Failed to initialize policy memory", exc_info=True)
 
         # Determine what to do first after wakeup
         action, description = determine_recovery_action(self.state)
@@ -711,6 +739,34 @@ class Manager:
         try:
             stripped = (text or "").strip()
 
+            # Ingest policy/rule/budget memories from incoming conversation
+            try:
+                ingest_result = self.policy_memory.ingest_text(
+                    stripped,
+                    source="creator_message",
+                    user_id=user_id,
+                    task_id=task_id,
+                )
+                if ingest_result.conflicts:
+                    conflict_lines = []
+                    for c in ingest_result.conflicts[:3]:
+                        others = " / ".join([f"[{e.memory_id}] {e.content}" for e in c.conflicts_with[:2]])
+                        conflict_lines.append(f"- 新規: {c.new_entry.content}\n  競合: {others}")
+                    consult_text = (
+                        "方針記憶に矛盾候補が検出されました。どちらを優先するか確認したいです。\n"
+                        + "\n".join(conflict_lines)
+                    )
+                    entry, created = self.consultation_store.ensure_pending(
+                        consult_text,
+                        related_task_id=task_id,
+                    )
+                    if created:
+                        self._slack_send(
+                            f"🤝 方針衝突を検知しました [consult_id: {entry.consultation_id}]\n\n{consult_text}"
+                        )
+            except Exception:
+                logger.warning("Failed to ingest policy memory from message", exc_info=True)
+
             # --- Creator directive (pause/cancel/resume) ---
             try:
                 directive = parse_creator_directive(stripped, thread_context=slack_thread_context)
@@ -815,7 +871,7 @@ class Manager:
 
             # Load recent conversation history (Req 1.2)
             try:
-                conversation_history = self.conversation_memory.recent()
+                conversation_history = self.conversation_memory.recent(n=60)
             except Exception:
                 logger.warning("Failed to load conversation history", exc_info=True)
                 conversation_history = None
@@ -907,6 +963,17 @@ class Manager:
             except Exception:
                 logger.warning("Failed to build model catalog", exc_info=True)
 
+            # Load policy memory context (direction/rules/budget)
+            policy_memory_text = None
+            policy_timeline_text = None
+            policy_conflicts_text = None
+            try:
+                policy_memory_text = self.policy_memory.format_active(limit=24)
+                policy_timeline_text = self.policy_memory.format_timeline(limit=30)
+                policy_conflicts_text = self.policy_memory.format_conflicts(limit=10)
+            except Exception:
+                logger.warning("Failed to load policy memory context", exc_info=True)
+
             system_prompt = build_system_prompt(
                 constitution=self.state.constitution,
                 wip=self.state.wip,
@@ -927,6 +994,9 @@ class Manager:
                 strategy_direction=self._load_strategy_direction(),
                 model_catalog_text=model_catalog_text,
                 open_commitments=open_commitments,
+                policy_memory_text=policy_memory_text,
+                policy_timeline_text=policy_timeline_text,
+                policy_conflicts_text=policy_conflicts_text,
             )
 
             conversation: list[dict[str, str]] = [
@@ -1243,6 +1313,16 @@ class Manager:
                             if self.memory_manager is not None:
                                 self.memory_manager.ingest_all_sources()
                             result_text = "メモリ保存: daily OK"
+
+                        try:
+                            self.policy_memory.ingest_text(
+                                payload,
+                                source=f"memory_{op}",
+                                user_id="ceo",
+                                task_id=task_id,
+                            )
+                        except Exception:
+                            logger.warning("Failed to ingest policy memory from memory action", exc_info=True)
                     except Exception as exc:
                         logger.warning("Memory action failed: %s", exc, exc_info=True)
                         result_text = f"メモリ保存エラー: {exc}"

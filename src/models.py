@@ -382,3 +382,20 @@ class StrategyDirection(BaseModel):
     weak_axes: List[str] = Field(default_factory=list)
     score_trends: Dict[str, float] = Field(default_factory=dict)
     summary: str = ""
+
+
+# --- Policy Memory (direction/rules/budget) ---
+
+class PolicyMemoryEntry(BaseModel):
+    """会社方針・運用ルール・予算方針などの長期記憶エントリ。"""
+
+    memory_id: str
+    created_at: datetime
+    category: Literal["direction", "rule", "budget", "operation", "fact"]
+    status: Literal["active", "conflicted", "superseded"] = "active"
+    content: str
+    source: str
+    user_id: Optional[str] = None
+    task_id: Optional[str] = None
+    conflict_with: List[str] = Field(default_factory=list)
+    importance: int = Field(default=3, ge=1, le=5)
