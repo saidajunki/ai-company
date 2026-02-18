@@ -2070,6 +2070,18 @@ class Manager:
         normalized = (text or "").replace(" ", "").replace("　", "").lower()
         if not normalized:
             return False
+
+        has_meta_intent = any(
+            k in normalized
+            for k in ("ロジック", "実装", "修正", "改善", "整備", "テスト", "検証", "ルーティング", "判定")
+        )
+        has_example_intent = any(
+            k in normalized
+            for k in ("要求された時", "聞かれた時", "訊かれた時", "への回答", "に答えられる", "を返せる")
+        )
+        if has_meta_intent or has_example_intent:
+            return False
+
         has_agent_word = any(
             k in normalized
             for k in ("社員ai", "社員", "エージェント", "sub-agent", "subagent", "worker")
