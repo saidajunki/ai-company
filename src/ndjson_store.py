@@ -8,12 +8,14 @@ Requirements: 5.5, 6.2, 8.2
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TypeVar
 
 from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
+logger = logging.getLogger(__name__)
 
 
 def ndjson_append(path: Path, obj: BaseModel) -> None:
@@ -35,6 +37,7 @@ def ndjson_read(path: Path, model_class: type[T]) -> list[T]:
         return []
 
     results: list[T] = []
+    invalid_count = 0
     with open(path, "r", encoding="utf-8") as f:
         for idx, line in enumerate(f, 1):
             stripped = line.strip()
@@ -43,6 +46,9 @@ def ndjson_read(path: Path, model_class: type[T]) -> list[T]:
             try:
                 results.append(model_class.model_validate_json(stripped))
             except Exception as e:
-                logging.warning(f"[WARN] ndjson_read: Skipping line {idx} (invalid JSON): {e}")
+                invalid_count += 1
+                if invalid_count <= 5:
+                    logger.warning("ndjson_read: skip invalid line %d in %s: %s", idx, path, e)
+    if invalid_count > 5:
+        logger.warning("ndjson_read: skipped %d invalid lines in %s (only first 5 shown)", invalid_count, path)
     return results
-

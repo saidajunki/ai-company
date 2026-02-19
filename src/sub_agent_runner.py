@@ -550,6 +550,7 @@ class SubAgentRunner:
         max_wall_seconds = _read_int_env("SUB_AGENT_MAX_WALL_SECONDS", MAX_CONVERSATION_WALL_SECONDS)
         progress_items: list[str] = []
         memory_payload_seen: set[str] = set()
+        ack_only_followup_count: int = 0
 
         def _elapsed_seconds() -> int:
             return int((datetime.now(timezone.utc) - started_at).total_seconds())
@@ -681,28 +682,61 @@ class SubAgentRunner:
                 self._log_activity(f"社員AI処理: name={agent_name} role={role} actions={kinds}")
 
             if self._is_ack_only_memory_followup(actions):
+                ack_only_followup_count += 1
                 _remember("loop guard: ack-only followup")
-                reply_actions = [a for a in actions if a.action_type == "reply" and (a.content or "").strip()]
-                guard_text = reply_actions[-1].content.strip() if reply_actions else "loop guard: ack-only followup"
                 self._log_activity(
                     f"社員AIループ抑止: name={agent_name} role={role} reason=ack_only_memory_followup"
                 )
-                _save_checkpoint(
-                    status="completed",
-                    reason="loop_guard_ack_only_followup",
-                    turn=turn,
-                    result_text=guard_text,
+                nudge_text = (
+                    "メモリ保存ACKは不要です。次の作業を続行してください。"
+                    "以後 <memory> は使わず、必要な作業は <shell>/<research>/<mcp>/<control> を優先し、"
+                    "最後は <done> で終了してください。"
                 )
-                return guard_text
+                if ack_only_followup_count <= 2:
+                    conversation.append({"role": "user", "content": nudge_text})
+                    _save_checkpoint(
+                        status="running",
+                        reason="loop_guard_ack_only_followup_nudge",
+                        turn=turn,
+                    )
+                    continue
+
+                reply_actions = [a for a in actions if a.action_type == "reply" and (a.content or "").strip()]
+                guard_text = reply_actions[-1].content.strip() if reply_actions else "loop guard: ack-only followup"
+                return _interrupt(
+                    reason=f"ack-only memory followup loop: {self._summarize(guard_text, limit=120)}",
+                    turn=turn,
+                    pending_hint="指示: <memory> を使わずに残作業を続行してください（必要なら employee resume で同じ run_id から再開）。",
+                )
+
+            ack_only_followup_count = 0
 
             done_result = None
             needs_followup = False
 
+            # Collect done/reply first; tool actions are executed by priority below.
             for action in actions:
                 if action.action_type == "done":
                     done_result = action.content
                     _remember(f"done候補: {self._summarize(done_result, limit=80)}")
-                elif action.action_type == "shell_command":
+                elif action.action_type == "reply":
+                    reply_text = (action.content or "").strip()
+                    if reply_text:
+                        _remember(f"reply: {self._summarize(reply_text, limit=90)}")
+
+            # Execute at most one tool action per turn (memory is lowest priority).
+            tool_action = None
+            for kind in ("shell_command", "research", "mcp", "control", "memory"):
+                for candidate in actions:
+                    if candidate.action_type == kind and (candidate.content or "").strip():
+                        tool_action = candidate
+                        break
+                if tool_action is not None:
+                    break
+
+            if tool_action is not None:
+                action = tool_action
+                if action.action_type == "shell_command":
                     command_summary = self._summarize(action.content, limit=100)
                     _remember(f"shell実行: {command_summary}")
                     self._log_activity(f"社員AIツール利用: name={agent_name} tool=shell")
@@ -716,140 +750,133 @@ class SubAgentRunner:
                         result_text += f"stderr:\n{shell_result.stderr}\n"
                     conversation.append({"role": "user", "content": result_text})
                     needs_followup = True
-                    break
                 elif action.action_type == "research":
                     query = action.content.strip()
-                    if not query:
-                        continue
-                    _remember(f"web検索: {self._summarize(query, limit=90)}")
-                    self._log_activity(f"社員AIツール利用: name={agent_name} tool=web_search")
-                    try:
-                        search_results = self.manager.web_searcher.search(query)
-                    except Exception:
-                        logger.warning(
-                            "Sub-agent research failed (agent_id=%s, query=%s)",
-                            agent_id,
-                            query,
-                            exc_info=True,
-                        )
-                        search_results = []
-
-                    now = datetime.now(timezone.utc)
-                    for sr in search_results:
+                    if query:
+                        _remember(f"web検索: {self._summarize(query, limit=90)}")
+                        self._log_activity(f"社員AIツール利用: name={agent_name} tool=web_search")
                         try:
-                            self.manager.research_note_store.save(ResearchNote(
-                                query=query,
-                                source_url=sr.url,
-                                title=sr.title,
-                                snippet=sr.snippet,
-                                summary=sr.snippet,
-                                retrieved_at=now,
-                            ))
+                            search_results = self.manager.web_searcher.search(query)
                         except Exception:
                             logger.warning(
-                                "Failed to save research note from sub-agent",
+                                "Sub-agent research failed (agent_id=%s, query=%s)",
+                                agent_id,
+                                query,
                                 exc_info=True,
                             )
+                            search_results = []
 
-                    if search_results:
-                        parts = [f"リサーチ結果 (query={query}):"]
-                        for i, sr in enumerate(search_results, 1):
-                            parts.append(f"{i}. {sr.title}\n   {sr.url}\n   {sr.snippet}")
-                        result_text = "\n".join(parts)
-                    else:
-                        result_text = f"リサーチ結果 (query={query}): 検索結果なし"
+                        now = datetime.now(timezone.utc)
+                        for sr in search_results:
+                            try:
+                                self.manager.research_note_store.save(ResearchNote(
+                                    query=query,
+                                    source_url=sr.url,
+                                    title=sr.title,
+                                    snippet=sr.snippet,
+                                    summary=sr.snippet,
+                                    retrieved_at=now,
+                                ))
+                            except Exception:
+                                logger.warning(
+                                    "Failed to save research note from sub-agent",
+                                    exc_info=True,
+                                )
 
-                    conversation.append({"role": "user", "content": result_text})
-                    needs_followup = True
-                    break
+                        if search_results:
+                            parts = [f"リサーチ結果 (query={query}):"]
+                            for i, sr in enumerate(search_results, 1):
+                                parts.append(f"{i}. {sr.title}\n   {sr.url}\n   {sr.snippet}")
+                            result_text = "\n".join(parts)
+                        else:
+                            result_text = f"リサーチ結果 (query={query}): 検索結果なし"
+
+                        conversation.append({"role": "user", "content": result_text})
+                        needs_followup = True
                 elif action.action_type == "mcp":
                     self._log_activity(f"社員AIツール利用: name={agent_name} tool=mcp")
                     payload = (action.content or "").strip()
-                    if not payload:
-                        continue
-                    _remember(f"mcp呼び出し: {self._summarize(payload, limit=90)}")
-                    try:
-                        result_text = self.manager.mcp_client.run_action(payload)
-                    except Exception as exc:
-                        logger.warning("Sub-agent MCP call failed: %s", exc, exc_info=True)
-                        result_text = f"MCP呼び出しエラー: {exc}"
+                    if payload:
+                        _remember(f"mcp呼び出し: {self._summarize(payload, limit=90)}")
+                        try:
+                            result_text = self.manager.mcp_client.run_action(payload)
+                        except Exception as exc:
+                            logger.warning("Sub-agent MCP call failed: %s", exc, exc_info=True)
+                            result_text = f"MCP呼び出しエラー: {exc}"
 
-                    conversation.append({"role": "user", "content": result_text})
-                    needs_followup = True
-                    break
+                        conversation.append({"role": "user", "content": result_text})
+                        needs_followup = True
                 elif action.action_type == "memory":
                     self._log_activity(f"社員AIツール利用: name={agent_name} tool=memory")
                     raw = (action.content or "").strip()
-                    if not raw:
-                        continue
-                    _remember(f"memory保存: {self._summarize(raw, limit=90)}")
+                    if raw:
+                        _remember(f"memory保存: {self._summarize(raw, limit=90)}")
 
-                    first, *rest = raw.splitlines()
-                    m = re.match(r"^(curated|daily|pin)\s*[:：]?\s*(.*)$", first.strip(), re.IGNORECASE)
-                    if m:
-                        op = m.group(1).lower()
-                        head = (m.group(2) or "").strip()
-                        tail = "\n".join(rest).strip() if rest else ""
-                        payload = (head + ("\n" + tail if tail else "")).strip()
-                    else:
-                        op = "daily"
-                        payload = raw
-
-                    payload_key = f"{op}:{' '.join(payload.split()).lower()[:600]}"
-                    if payload_key in memory_payload_seen:
-                        _remember("loop guard: duplicate memory payload")
-                        conversation.append({"role": "user", "content": "メモリ保存スキップ: duplicate payload(loop_guard)"})
-                        self._log_activity(
-                            f"社員AIループ抑止: name={agent_name} role={role} reason=duplicate_memory_payload"
-                        )
-                        continue
-
-                    def _split_title_body(text: str) -> tuple[str | None, str]:
-                        s = (text or "").strip()
-                        if not s:
-                            return None, ""
-                        lines = s.splitlines()
-                        if (
-                            len(lines) >= 2
-                            and lines[0].strip()
-                            and len(lines[0].strip()) <= 80
-                            and not lines[0].lstrip().startswith(("-", "*", "#"))
-                        ):
-                            title = lines[0].strip()
-                            body = "\n".join(lines[1:]).strip()
-                            return (title if body else None), (body or title)
-                        return None, s
-
-                    try:
-                        if op == "pin":
-                            doc_id = None
-                            mm = getattr(self.manager, "memory_manager", None)
-                            if mm is not None:
-                                doc_id = mm.pin(payload)
-                                mm.ingest_all_sources()
-                            result_text = f"メモリ保存: pin OK ({doc_id or 'no-index'})"
-                        elif op == "curated":
-                            title, body = _split_title_body(payload)
-                            self.manager.memory_vault.append(body, title=title, author=agent_id)
-                            mm = getattr(self.manager, "memory_manager", None)
-                            if mm is not None:
-                                mm.ingest_all_sources()
-                            result_text = "メモリ保存: curated OK"
+                        first, *rest = raw.splitlines()
+                        m = re.match(r"^(curated|daily|pin)\s*[:：]?\s*(.*)$", first.strip(), re.IGNORECASE)
+                        if m:
+                            op = m.group(1).lower()
+                            head = (m.group(2) or "").strip()
+                            tail = "\n".join(rest).strip() if rest else ""
+                            payload = (head + ("\n" + tail if tail else "")).strip()
                         else:
-                            title, body = _split_title_body(payload)
-                            self.manager.memory_vault.append_daily(body, title=title, author=agent_id)
-                            mm = getattr(self.manager, "memory_manager", None)
-                            if mm is not None:
-                                mm.ingest_all_sources()
-                            result_text = "メモリ保存: daily OK"
-                        memory_payload_seen.add(payload_key)
-                    except Exception as exc:
-                        logger.warning("Sub-agent memory action failed: %s", exc, exc_info=True)
-                        result_text = f"メモリ保存エラー: {exc}"
+                            op = "daily"
+                            payload = raw
 
-                    conversation.append({"role": "user", "content": result_text})
-                    needs_followup = True
-                    break
+                        payload_key = f"{op}:{' '.join(payload.split()).lower()[:600]}"
+                        if payload_key in memory_payload_seen:
+                            _remember("loop guard: duplicate memory payload")
+                            self._log_activity(
+                                f"社員AIループ抑止: name={agent_name} role={role} reason=duplicate_memory_payload"
+                            )
+                        else:
+                            def _split_title_body(text: str) -> tuple[str | None, str]:
+                                s = (text or "").strip()
+                                if not s:
+                                    return None, ""
+                                lines = s.splitlines()
+                                if (
+                                    len(lines) >= 2
+                                    and lines[0].strip()
+                                    and len(lines[0].strip()) <= 80
+                                    and not lines[0].lstrip().startswith(("-", "*", "#"))
+                                ):
+                                    title = lines[0].strip()
+                                    body = "\n".join(lines[1:]).strip()
+                                    return (title if body else None), (body or title)
+                                return None, s
+
+                            try:
+                                if op == "pin":
+                                    doc_id = None
+                                    mm = getattr(self.manager, "memory_manager", None)
+                                    if mm is not None:
+                                        doc_id = mm.pin(payload)
+                                        mm.ingest_all_sources()
+                                    result_text = f"メモリ保存: pin OK ({doc_id or 'no-index'})"
+                                elif op == "curated":
+                                    title, body = _split_title_body(payload)
+                                    self.manager.memory_vault.append(body, title=title, author=agent_id)
+                                    mm = getattr(self.manager, "memory_manager", None)
+                                    if mm is not None:
+                                        mm.ingest_all_sources()
+                                    result_text = "メモリ保存: curated OK"
+                                else:
+                                    title, body = _split_title_body(payload)
+                                    self.manager.memory_vault.append_daily(body, title=title, author=agent_id)
+                                    mm = getattr(self.manager, "memory_manager", None)
+                                    if mm is not None:
+                                        mm.ingest_all_sources()
+                                    result_text = "メモリ保存: daily OK"
+                                memory_payload_seen.add(payload_key)
+                            except Exception as exc:
+                                logger.warning("Sub-agent memory action failed: %s", exc, exc_info=True)
+                                result_text = f"メモリ保存エラー: {exc}"
+
+                            conversation.append(
+                                {"role": "user", "content": result_text + "\n(ACK不要。次の作業を続行してください。)"}
+                            )
+                            needs_followup = True
                 elif action.action_type == "control":
                     self._log_activity(f"社員AIツール利用: name={agent_name} tool=control")
                     result_parts: list[str] = []
@@ -874,13 +901,8 @@ class SubAgentRunner:
                     result_text = "\n".join(result_parts).strip()
                     conversation.append({"role": "user", "content": result_text})
                     needs_followup = True
-                    break
-                elif action.action_type == "reply":
-                    reply_text = (action.content or "").strip()
-                    if reply_text:
-                        _remember(f"reply: {self._summarize(reply_text, limit=90)}")
 
-            if done_result is not None:
+            if not needs_followup and done_result is not None:
                 self._log_activity(
                     f"社員AI→CEO 完了報告: name={agent_name} role={role} "
                     f"done={self._summarize(done_result, limit=220)}"

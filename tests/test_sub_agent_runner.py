@@ -353,9 +353,39 @@ class TestShellExecution:
         assert result == "シェル実行完了"
         assert call_count == 2
 
+    def test_shell_is_prioritized_over_memory(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        # If memory is deprioritized correctly, this should not be called.
+        mgr.memory_vault.append_daily = MagicMock()
+        runner = SubAgentRunner(mgr)
+
+        mock_sub = _make_mock_llm()
+        mock_sub.chat.side_effect = [
+            LLMResponse(
+                content="<memory>daily: メモ</memory>\n<shell>echo hi</shell>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<done>完了</done>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+        ]
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
+
+        result = runner.spawn("Worker", "developer", "優先度テスト")
+        assert result == "完了"
+        assert mock_sub.chat.call_count == 2
+        assert mgr.memory_vault.append_daily.call_count == 0
+
 
 class TestMemoryLoopGuard:
-    def test_ack_only_followup_stops_recursion(self, tmp_path: Path):
+    def test_ack_only_followup_is_nudged_and_can_continue(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
         runner = SubAgentRunner(mgr)
 
@@ -369,14 +399,14 @@ class TestMemoryLoopGuard:
                 finish_reason="stop",
             ),
             LLMResponse(
-                content="<reply>メモリ保存: daily OK</reply>\n<memory>daily: メモリ保存: daily OK</memory>",
+                content="<reply>メモリ保存: daily OK</reply>",
                 input_tokens=50,
                 output_tokens=30,
                 model="test-model",
                 finish_reason="stop",
             ),
             LLMResponse(
-                content="<done>到達しない想定</done>",
+                content="<done>完了</done>",
                 input_tokens=50,
                 output_tokens=30,
                 model="test-model",
@@ -387,10 +417,51 @@ class TestMemoryLoopGuard:
 
         result = runner.spawn("Worker", "developer", "memoryループ対策の確認")
 
-        assert "メモリ保存: daily OK" in result
-        assert mock_sub.chat.call_count == 2
+        assert result == "完了"
+        assert mock_sub.chat.call_count == 3
         checkpoint_text = runner._run_checkpoint_path().read_text(encoding="utf-8")
         assert "loop guard: ack-only followup" in checkpoint_text
+
+    def test_ack_only_followup_loop_interrupts(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        runner = SubAgentRunner(mgr)
+
+        mock_sub = _make_mock_llm()
+        mock_sub.chat.side_effect = [
+            LLMResponse(
+                content="<memory>daily: 重要メモ</memory>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<reply>メモリ保存: daily OK</reply>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<reply>メモリ保存: daily OK</reply>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<reply>メモリ保存: daily OK</reply>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+        ]
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
+
+        result = runner.spawn("Worker", "developer", "ack-onlyループ対策")
+        assert "社員AI中断報告" in result
+        assert mock_sub.chat.call_count == 4
 
     def test_duplicate_memory_payload_is_guarded(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)

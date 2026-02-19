@@ -80,6 +80,16 @@ class TestNdjsonRead:
         result = ndjson_read(ndjson_path, LedgerEvent)
         assert len(result) == 2
 
+    def test_skips_invalid_lines(self, ndjson_path: Path):
+        ndjson_append(ndjson_path, _make_ledger_event(task_id="task-ok-1"))
+        # Insert an invalid JSON line
+        with open(ndjson_path, "a", encoding="utf-8") as f:
+            f.write("{\n")
+        ndjson_append(ndjson_path, _make_ledger_event(task_id="task-ok-2"))
+
+        result = ndjson_read(ndjson_path, LedgerEvent)
+        assert [e.task_id for e in result] == ["task-ok-1", "task-ok-2"]
+
 
 class TestRoundTrip:
     def test_ledger_event_round_trip(self, ndjson_path: Path):
