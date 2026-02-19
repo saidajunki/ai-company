@@ -962,6 +962,16 @@ class SubAgentRunner:
     def _is_ack_only_memory_followup(cls, actions: list) -> bool:
         if not actions:
             return False
+        only_mem = True
+        for action in actions:
+            if action.action_type in ("memory", "reply"):
+                if not cls._looks_like_memory_ack_payload(action.content):
+                    only_mem = False
+                    break
+            else:
+                only_mem = False
+                break
+        return only_mem
 
         saw_any = False
         for action in actions:
