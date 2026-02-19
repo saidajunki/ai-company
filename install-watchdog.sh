@@ -15,6 +15,9 @@
 #
 # HEARTBEAT_PATH : heartbeat.json のフルパス（未設定なら docker exec 経由で読む）
 #
+# SYSTEMD_SERVICE_NAME : systemd サービス名（設定すると systemctl restart で復旧する）
+#   例: ai-company
+#
 # CONTAINER_NAME : Docker コンテナ名（デフォルト: ai-company）
 #   例: ai-company
 #
@@ -40,12 +43,18 @@ fi
 HEARTBEAT_PATH="${HEARTBEAT_PATH-}"
 SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL-}"
 CONTAINER_NAME="${CONTAINER_NAME:-ai-company}"
+SYSTEMD_SERVICE_NAME="${SYSTEMD_SERVICE_NAME-}"
 COMPANY_ID="${COMPANY_ID:-alpha}"
 THRESHOLD_MINUTES="${THRESHOLD_MINUTES:-20}"
 BASE_DIR_IN_CONTAINER="${BASE_DIR_IN_CONTAINER:-/app/data}"
 
+# systemd mode: default to host heartbeat path if not provided
+if [ -n "${SYSTEMD_SERVICE_NAME}" ] && [ -z "${HEARTBEAT_PATH}" ]; then
+  HEARTBEAT_PATH="/opt/apps/ai-company/data/companies/${COMPANY_ID}/state/heartbeat.json"
+fi
+
 # cron エントリを構築
-CRON_ENTRY="*/5 * * * * HEARTBEAT_PATH=${HEARTBEAT_PATH} SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL} CONTAINER_NAME=${CONTAINER_NAME} COMPANY_ID=${COMPANY_ID} THRESHOLD_MINUTES=${THRESHOLD_MINUTES} BASE_DIR_IN_CONTAINER=${BASE_DIR_IN_CONTAINER} /usr/bin/python3 ${WATCHDOG_PATH} >> /var/log/watchdog.log 2>&1"
+CRON_ENTRY="*/5 * * * * HEARTBEAT_PATH=${HEARTBEAT_PATH} SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL} CONTAINER_NAME=${CONTAINER_NAME} SYSTEMD_SERVICE_NAME=${SYSTEMD_SERVICE_NAME} COMPANY_ID=${COMPANY_ID} THRESHOLD_MINUTES=${THRESHOLD_MINUTES} BASE_DIR_IN_CONTAINER=${BASE_DIR_IN_CONTAINER} /usr/bin/python3 ${WATCHDOG_PATH} >> /var/log/watchdog.log 2>&1"
 
 # 既存の watchdog cron エントリを除去し、新しいエントリを追加
 (crontab -l 2>/dev/null | grep -v "watchdog.py" || true; echo "$CRON_ENTRY") | crontab -

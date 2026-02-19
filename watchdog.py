@@ -183,6 +183,33 @@ def restart_container(container_name: str = "ai-company") -> tuple[bool, str]:
         return False, msg
 
 
+def restart_systemd_service(service_name: str) -> tuple[bool, str]:
+    """Restart a systemd service."""
+    service = (service_name or "").strip()
+    if not service:
+        return False, "service_name is empty"
+    try:
+        result = subprocess.run(
+            ["systemctl", "restart", service],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode == 0:
+            logger.info("systemd service '%s' restarted successfully.", service)
+            return True, result.stdout.strip()
+        logger.error("systemctl restart failed (rc=%d): %s", result.returncode, result.stderr.strip())
+        return False, (result.stderr or result.stdout).strip()
+    except subprocess.TimeoutExpired:
+        msg = f"systemctl restart timed out for '{service}'"
+        logger.error(msg)
+        return False, msg
+    except Exception as exc:
+        msg = f"systemctl restart error: {exc}"
+        logger.error(msg)
+        return False, msg
+
+
 def notify_slack(webhook_url: str, message: str) -> bool:
     """Slack Webhook に通知を送信する.
 
@@ -210,9 +237,14 @@ def main() -> None:
     heartbeat_path = os.environ.get("HEARTBEAT_PATH", "").strip() or None
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "")
     container_name = os.environ.get("CONTAINER_NAME", "ai-company")
+    systemd_service_name = os.environ.get("SYSTEMD_SERVICE_NAME", "").strip()
     company_id = os.environ.get("COMPANY_ID", "alpha")
     threshold_minutes = int(os.environ.get("THRESHOLD_MINUTES", "20"))
     base_dir_in_container = os.environ.get("BASE_DIR_IN_CONTAINER", "/app/data")
+
+    # systemd mode: default heartbeat path on host
+    if systemd_service_name and not heartbeat_path:
+        heartbeat_path = f"/opt/apps/ai-company/data/companies/{company_id}/state/heartbeat.json"
 
     if not webhook_url:
         logger.warning("SLACK_WEBHOOK_URL is not set; Slack notifications disabled.")
@@ -227,6 +259,41 @@ def main() -> None:
 
     if not stale:
         logger.info("Heartbeat OK — nothing to do.")
+        return
+
+    # ------------------------------------------------------------------
+    # systemd mode (host process)
+    # ------------------------------------------------------------------
+    if systemd_service_name:
+        msg = (
+            f"⚠️ Watchdog: heartbeat が stale です（{elapsed:.1f}分、閾値={threshold_minutes}分）。\n"
+            f"systemd を再起動します: `{systemd_service_name}` / company_id={company_id}"
+        )
+        if webhook_url:
+            notify_slack(webhook_url, msg)
+
+        ok, out = restart_systemd_service(systemd_service_name)
+        if not ok:
+            logger.warning("systemd restart failed: %s", out)
+        time.sleep(30)
+        data2 = read_heartbeat(
+            heartbeat_path=heartbeat_path,
+            container_name=container_name,
+            company_id=company_id,
+            base_dir_in_container=base_dir_in_container,
+        )
+        stale2, elapsed2 = heartbeat_is_stale(data2, threshold_minutes=threshold_minutes)
+        if not stale2:
+            msg2 = f"✅ Watchdog: systemd再起動で復帰しました（経過={elapsed2:.1f}分）。"
+            if webhook_url:
+                notify_slack(webhook_url, msg2)
+            return
+        msg3 = (
+            f"⚠️ Watchdog: systemd再起動後も heartbeat が stale です（{elapsed2:.1f}分）。\n"
+            f"service: `{systemd_service_name}` / company_id={company_id}"
+        )
+        if webhook_url:
+            notify_slack(webhook_url, msg3)
         return
 
     # Heartbeat is stale → notify, then (A) restart manager process, then (B) restart container if needed
