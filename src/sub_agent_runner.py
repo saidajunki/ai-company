@@ -1126,5 +1126,17 @@ class SubAgentRunner:
             e for e in self.manager.state.ledger_events
             if e.agent_id == agent_id and e.estimated_cost_usd is not None
         ]
-        total = sum(e.estimated_cost_usd for e in agent_events)
+        # NOTE: Budget limits are intended to be evaluated over a sliding window
+        # (aligned with the company's budget window), not lifetime accumulated cost.
+        window_minutes = 60
+        try:
+            constitution = getattr(self.manager.state, "constitution", None)
+            if constitution is not None and getattr(constitution, "budget", None) is not None:
+                wm = int(getattr(constitution.budget, "window_minutes", 60) or 60)
+                window_minutes = max(1, wm)
+        except Exception:
+            window_minutes = 60
+
+        now = datetime.now(timezone.utc)
+        total = compute_window_cost(agent_events, now, window_minutes=window_minutes)
         return total >= budget_limit_usd
