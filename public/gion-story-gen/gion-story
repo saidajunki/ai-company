@@ -1,0 +1,5 @@
+#!/bin/bash
+# 擬音ショートストーリー生成シェルラッパー
+
+SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"
+python3 "$SCRIPTDIR/gion_story_gen.py" "$@"
