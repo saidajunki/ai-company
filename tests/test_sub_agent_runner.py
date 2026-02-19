@@ -354,6 +354,82 @@ class TestShellExecution:
         assert call_count == 2
 
 
+class TestMemoryLoopGuard:
+    def test_ack_only_followup_stops_recursion(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        runner = SubAgentRunner(mgr)
+
+        mock_sub = _make_mock_llm()
+        mock_sub.chat.side_effect = [
+            LLMResponse(
+                content="<memory>daily: 重要な進捗メモ</memory>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<reply>メモリ保存: daily OK</reply>\n<memory>daily: メモリ保存: daily OK</memory>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<done>到達しない想定</done>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+        ]
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
+
+        result = runner.spawn("Worker", "developer", "memoryループ対策の確認")
+
+        assert "メモリ保存: daily OK" in result
+        assert mock_sub.chat.call_count == 2
+        checkpoint_text = runner._run_checkpoint_path().read_text(encoding="utf-8")
+        assert "loop guard: ack-only followup" in checkpoint_text
+
+    def test_duplicate_memory_payload_is_guarded(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        runner = SubAgentRunner(mgr)
+
+        mock_sub = _make_mock_llm()
+        mock_sub.chat.side_effect = [
+            LLMResponse(
+                content="<memory>daily: 同一内容の保存テスト</memory>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<reply>duplicate blocked</reply>\n<memory>daily: 同一内容の保存テスト</memory>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+            LLMResponse(
+                content="<done>到達しない想定</done>",
+                input_tokens=50,
+                output_tokens=30,
+                model="test-model",
+                finish_reason="stop",
+            ),
+        ]
+        runner._create_llm_client = MagicMock(return_value=mock_sub)
+
+        result = runner.spawn("Worker", "developer", "duplicate payload対策の確認")
+
+        assert result == "duplicate blocked"
+        assert mock_sub.chat.call_count == 2
+        checkpoint_text = runner._run_checkpoint_path().read_text(encoding="utf-8")
+        assert "loop guard: duplicate memory payload" in checkpoint_text
+
+
 # ---------------------------------------------------------------------------
 # Max conversation turns
 # ---------------------------------------------------------------------------

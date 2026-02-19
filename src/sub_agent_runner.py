@@ -549,6 +549,7 @@ class SubAgentRunner:
         max_turns = _read_int_env("SUB_AGENT_MAX_TURNS", MAX_CONVERSATION_TURNS)
         max_wall_seconds = _read_int_env("SUB_AGENT_MAX_WALL_SECONDS", MAX_CONVERSATION_WALL_SECONDS)
         progress_items: list[str] = []
+        memory_payload_seen: set[str] = set()
 
         def _elapsed_seconds() -> int:
             return int((datetime.now(timezone.utc) - started_at).total_seconds())
@@ -679,6 +680,21 @@ class SubAgentRunner:
                 kinds = ", ".join(a.action_type for a in actions)
                 self._log_activity(f"社員AI処理: name={agent_name} role={role} actions={kinds}")
 
+            if self._is_ack_only_memory_followup(actions):
+                _remember("loop guard: ack-only followup")
+                reply_actions = [a for a in actions if a.action_type == "reply" and (a.content or "").strip()]
+                guard_text = reply_actions[-1].content.strip() if reply_actions else "loop guard: ack-only followup"
+                self._log_activity(
+                    f"社員AIループ抑止: name={agent_name} role={role} reason=ack_only_memory_followup"
+                )
+                _save_checkpoint(
+                    status="completed",
+                    reason="loop_guard_ack_only_followup",
+                    turn=turn,
+                    result_text=guard_text,
+                )
+                return guard_text
+
             done_result = None
             needs_followup = False
 
@@ -779,6 +795,15 @@ class SubAgentRunner:
                         op = "daily"
                         payload = raw
 
+                    payload_key = f"{op}:{' '.join(payload.split()).lower()[:600]}"
+                    if payload_key in memory_payload_seen:
+                        _remember("loop guard: duplicate memory payload")
+                        conversation.append({"role": "user", "content": "メモリ保存スキップ: duplicate payload(loop_guard)"})
+                        self._log_activity(
+                            f"社員AIループ抑止: name={agent_name} role={role} reason=duplicate_memory_payload"
+                        )
+                        continue
+
                     def _split_title_body(text: str) -> tuple[str | None, str]:
                         s = (text or "").strip()
                         if not s:
@@ -817,6 +842,7 @@ class SubAgentRunner:
                             if mm is not None:
                                 mm.ingest_all_sources()
                             result_text = "メモリ保存: daily OK"
+                        memory_payload_seen.add(payload_key)
                     except Exception as exc:
                         logger.warning("Sub-agent memory action failed: %s", exc, exc_info=True)
                         result_text = f"メモリ保存エラー: {exc}"
@@ -914,6 +940,38 @@ class SubAgentRunner:
                 return llm_result.content
 
             _save_checkpoint(status="running", reason="followup", turn=turn)
+
+    @staticmethod
+    def _looks_like_memory_ack_payload(payload: str) -> bool:
+        text = (payload or "").strip().lower()
+        if not text:
+            return False
+        loop_markers = (
+            "curated ok",
+            "daily ok",
+            "pin ok",
+            "メモリ保存",
+            "保存しました",
+            "保存済み",
+            "loop_guard",
+            "duplicate payload",
+        )
+        return any(marker in text for marker in loop_markers)
+
+    @classmethod
+    def _is_ack_only_memory_followup(cls, actions: list) -> bool:
+        if not actions:
+            return False
+
+        saw_any = False
+        for action in actions:
+            if action.action_type in ("memory", "reply"):
+                saw_any = True
+                if not cls._looks_like_memory_ack_payload(action.content):
+                    return False
+                continue
+            return False
+        return saw_any
 
     @staticmethod
     def _extract_resume_run_id(text: str) -> str | None:
