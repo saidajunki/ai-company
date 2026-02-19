@@ -29,16 +29,20 @@ def ndjson_append(path: Path, obj: BaseModel) -> None:
 def ndjson_read(path: Path, model_class: type[T]) -> list[T]:
     """Read all lines from an NDJSON file and deserialize into model instances.
 
-    Returns an empty list if the file doesn't exist. Blank lines are skipped.
+    Returns an empty list if the file doesn't exist. Blank lines are skipped. Corrupted lines are skipped with a warning.
     """
     if not path.exists():
         return []
 
     results: list[T] = []
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
+        for idx, line in enumerate(f, 1):
             stripped = line.strip()
             if not stripped:
                 continue
-            results.append(model_class.model_validate_json(stripped))
+            try:
+                results.append(model_class.model_validate_json(stripped))
+            except Exception as e:
+                logging.warning(f"[WARN] ndjson_read: Skipping line {idx} (invalid JSON): {e}")
     return results
+
