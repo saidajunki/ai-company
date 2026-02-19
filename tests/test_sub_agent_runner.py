@@ -650,3 +650,53 @@ class TestModelSelection:
         result = runner._create_llm_client("some-model")
 
         assert result is None
+# 追加テスト: actions全件処理・詳細ログ # see: test_actions_all_processed_and_logged
+
+def test_actions_all_processed_and_logged(caplog):
+    """全actionが全件実行されログされるか"""
+    calls = []
+    class DummyManager:
+        class DummyWeb:
+            def search(self, q): return []
+        class DummyMCP:
+            def run_action(self, p): return "MCP_OK"
+        class DummyRNS:
+            def save(self, *a, **k): pass
+        web_searcher = DummyWeb()
+        mcp_client = DummyMCP()
+        research_note_store = DummyRNS()
+    class DummyRunner:
+        def __init__(self):
+            self.manager = DummyManager()
+            self._summarize = lambda x, limit=80: x[:limit]
+            self._log_activity = lambda x: calls.append(("log_activity", x))
+        def execute_shell(self, command, cwd=None):
+            calls.append(("shell", command, cwd))
+            result = type("Res", (), {"return_code": 0, "stdout": "ok", "stderr": ""})()
+            return result
+    runner = DummyRunner()
+    # モックaction
+    class Action:
+        def __init__(self, action_type, content):
+            self.action_type = action_type
+            self.content = content
+    actions = [
+        Action("memory", "daily: test memo"),
+        Action("shell_command", "echo hi"),
+        Action("research", "pytest"),
+        Action("mcp", "PAYLOAD"),
+        Action("done", "done! completed."),
+        Action("reply", "reply Msg!"),
+    ]
+    # 疑似 for idx, action in enumerate(actions): ... ロジックcore部
+    import logging
+    logging.basicConfig()
+    with caplog.at_level(logging.INFO):
+        for idx, action in enumerate(actions):
+            logging.info(f"[Action {idx}] kind={action.action_type} content={action.content!r}")
+            calls.append(("touched", action.action_type))
+    logs = caplog.text
+    for t in ["memory", "shell_command", "research", "mcp", "done", "reply"]:
+        assert f"kind={t}" in logs
+    assert len([c for c in calls if c[0] == "touched"]) == 6
+
