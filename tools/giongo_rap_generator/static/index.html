@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>AIラップ自動生成デモ</title>
+    <style>
+      body { font-family: "Meiryo", sans-serif; margin: 2em; }
+      pre { background: #f9f9f9; padding: 1em; border-radius: 5px; }
+      button { font-size:1.2em; padding:0.5em 1.5em; }
+    </style>
+</head>
+<body>
+    <h1>AIラップ自動生成デモ</h1>
+    <button onclick="generate()">ラップを生成！</button>
+    <pre id="result">...</pre>
+    <script>
+      async function generate() {
+        document.getElementById('result').textContent = '生成中...';
+        try {
+          const r = await fetch('/api/generate_rap');
+          const j = await r.json();
+          document.getElementById('result').textContent = j.lyric || j.error;
+        } catch(e) {
+          document.getElementById('result').textContent = 'APIエラー';
+        }
+      }
+    </script>
+</body>
+</html>
