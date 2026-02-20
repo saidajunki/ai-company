@@ -16,3 +16,10 @@ AIエージェント中心で運用する「会社（組織）」の構想・要
 - `ai-company/docs/02_design.md`: 設計（構成要素、記憶、台帳、情報収集、承認フロー）
 - `ai-company/docs/03_roadmap.md`: 進め方（タスク/マイルストーン）
 - `ai-company/docs/decision-log.md`: 意思決定ログ（いつ・何を・なぜ・見直し条件）
+-e 
+# ASCII4コマ漫画 変換・SNS自動投稿
+
+python src/ascii4koma_to_svg.py # SVG/PNG生成
+python src/ai_news_sns_publisher.py ascii4koma_sample.png '投稿例' # SNS投稿
+(要 requests/cairosvg/Token)
+
